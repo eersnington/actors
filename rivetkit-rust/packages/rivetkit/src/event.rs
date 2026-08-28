@@ -96,6 +96,7 @@ impl<A: Actor> RuntimeEvent<A> {
 				conn,
 				scheduled_fire,
 				reply,
+				..
 			} => Self::Action(ActionCall {
 				name,
 				args,
@@ -1493,6 +1494,7 @@ mod tests {
 				.send(ActorEvent::Action {
 					name: "ping".into(),
 					args: Vec::new(),
+					telemetry: None,
 					conn: None,
 					scheduled_fire: None,
 					reply: reply_tx.into(),

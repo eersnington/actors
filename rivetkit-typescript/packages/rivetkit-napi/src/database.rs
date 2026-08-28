@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
@@ -7,6 +7,7 @@ use rivetkit_core::sqlite::{
 	SqliteBatchStatement as CoreSqliteBatchStatement, SqliteDb as CoreSqliteDb,
 	SqliteTransaction as CoreSqliteTransaction,
 };
+use rivetkit_core::ActorOperationTelemetry;
 
 use crate::{NapiInvalidArgument, napi_anyhow_error};
 #[napi]
@@ -14,22 +15,43 @@ use crate::{NapiInvalidArgument, napi_anyhow_error};
 pub struct JsNativeDatabase {
 	db: CoreSqliteDb,
 	actor_id: Option<String>,
+	telemetry: Option<ActorOperationTelemetry>,
 }
 
 #[napi]
 #[derive(Clone)]
 pub struct JsSqliteTransaction {
 	transaction: CoreSqliteTransaction,
+	telemetry: Option<ActorOperationTelemetry>,
 }
 
 impl JsNativeDatabase {
-	pub(crate) fn new(db: CoreSqliteDb, actor_id: Option<String>) -> Self {
+	pub(crate) fn new(
+		db: CoreSqliteDb,
+		actor_id: Option<String>,
+		telemetry: Option<ActorOperationTelemetry>,
+	) -> Self {
 		tracing::debug!(
 			class = "JsNativeDatabase",
 			actor_id = actor_id.as_deref().unwrap_or("<unknown>"),
 			"constructed napi class"
 		);
-		Self { db, actor_id }
+		Self {
+			db,
+			actor_id,
+			telemetry,
+		}
+	}
+
+	async fn trace<T, E>(
+		&self,
+		operation: &'static str,
+		future: impl Future<Output = Result<T, E>>,
+	) -> Result<T, E> {
+		match &self.telemetry {
+			Some(telemetry) => telemetry.trace("sqlite", operation, future).await,
+			None => future.await,
+		}
 	}
 }
 
@@ -124,8 +146,7 @@ impl JsNativeDatabase {
 	) -> napi::Result<ExecuteResult> {
 		let params = params.map(js_bind_params_to_core).transpose()?;
 		let result = self
-			.db
-			.run(sql, params)
+			.trace("run", self.db.run(sql, params))
 			.await
 			.map_err(crate::napi_anyhow_error)?;
 		Ok(ExecuteResult {
@@ -141,8 +162,7 @@ impl JsNativeDatabase {
 	) -> napi::Result<QueryResult> {
 		let params = params.map(js_bind_params_to_core).transpose()?;
 		let result = self
-			.db
-			.query(sql, params)
+			.trace("query", self.db.query(sql, params))
 			.await
 			.map_err(crate::napi_anyhow_error)?;
 		Ok(core_query_result_to_js(result))
@@ -156,8 +176,7 @@ impl JsNativeDatabase {
 	) -> napi::Result<NativeExecuteResult> {
 		let params = params.map(js_bind_params_to_core).transpose()?;
 		let result = self
-			.db
-			.execute(sql, params)
+			.trace("execute", self.db.execute(sql, params))
 			.await
 			.map_err(crate::napi_anyhow_error)?;
 		Ok(core_execute_result_to_js(result))
@@ -170,8 +189,7 @@ impl JsNativeDatabase {
 	) -> napi::Result<Vec<NativeExecuteResult>> {
 		let statements = js_batch_statements_to_core(statements)?;
 		let results = self
-			.db
-			.execute_batch(statements)
+			.trace("execute_batch", self.db.execute_batch(statements))
 			.await
 			.map_err(crate::napi_anyhow_error)?;
 		Ok(results.into_iter().map(core_execute_result_to_js).collect())
@@ -179,7 +197,10 @@ impl JsNativeDatabase {
 
 	#[napi]
 	pub async fn exec(&self, sql: String) -> napi::Result<QueryResult> {
-		let result = self.db.exec(sql).await.map_err(crate::napi_anyhow_error)?;
+		let result = self
+			.trace("exec", self.db.exec(sql))
+			.await
+			.map_err(crate::napi_anyhow_error)?;
 		Ok(core_query_result_to_js(result))
 	}
 
@@ -195,11 +216,26 @@ impl JsNativeDatabase {
 	) -> napi::Result<JsSqliteTransaction> {
 		let timeout = timeout_ms.map(transaction_timeout).transpose()?;
 		let transaction = self
-			.db
-			.begin_transaction(timeout)
+			.trace("transaction_begin", self.db.begin_transaction(timeout))
 			.await
 			.map_err(crate::napi_anyhow_error)?;
-		Ok(JsSqliteTransaction { transaction })
+		Ok(JsSqliteTransaction {
+			transaction,
+			telemetry: self.telemetry.clone(),
+		})
+	}
+}
+
+impl JsSqliteTransaction {
+	async fn trace<T, E>(
+		&self,
+		operation: &'static str,
+		future: impl Future<Output = Result<T, E>>,
+	) -> Result<T, E> {
+		match &self.telemetry {
+			Some(telemetry) => telemetry.trace("sqlite", operation, future).await,
+			None => future.await,
+		}
 	}
 }
 
@@ -212,8 +248,10 @@ impl JsSqliteTransaction {
 		params: Option<Vec<JsBindParam>>,
 	) -> napi::Result<NativeExecuteResult> {
 		let params = params.map(js_bind_params_to_core).transpose()?;
-		self.transaction
-			.execute(sql, params)
+		self.trace(
+			"transaction_execute",
+			self.transaction.execute(sql, params),
+		)
 			.await
 			.map(core_execute_result_to_js)
 			.map_err(crate::napi_anyhow_error)
@@ -221,8 +259,7 @@ impl JsSqliteTransaction {
 
 	#[napi]
 	pub async fn exec(&self, sql: String) -> napi::Result<QueryResult> {
-		self.transaction
-			.exec(sql)
+		self.trace("transaction_exec", self.transaction.exec(sql))
 			.await
 			.map(core_query_result_to_js)
 			.map_err(crate::napi_anyhow_error)
@@ -230,16 +267,14 @@ impl JsSqliteTransaction {
 
 	#[napi]
 	pub async fn commit(&self) -> napi::Result<()> {
-		self.transaction
-			.commit()
+		self.trace("transaction_commit", self.transaction.commit())
 			.await
 			.map_err(crate::napi_anyhow_error)
 	}
 
 	#[napi]
 	pub async fn rollback(&self) -> napi::Result<()> {
-		self.transaction
-			.rollback()
+		self.trace("transaction_rollback", self.transaction.rollback())
 			.await
 			.map_err(crate::napi_anyhow_error)
 	}

@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import type {
 	ActorContext as NativeActorContext,
 	NapiActorFactory as NativeActorFactory,
@@ -218,14 +220,28 @@ export class NapiCoreRuntime implements CoreRuntime {
 	readonly kind = "napi";
 
 	#bindings: NativeBindings;
+	#actorContext = new AsyncLocalStorage<ActorContextHandle>();
 	#sql = new WeakMap<NativeActorContext, NapiSqlDatabase>();
 
 	constructor(bindings: NativeBindings) {
 		this.#bindings = bindings;
 	}
 
+	runWithActorContext<T>(
+		ctx: ActorContextHandle,
+		callback: () => Promise<T>,
+	): Promise<T> {
+		return this.#actorContext.run(ctx, callback);
+	}
+
+	#actorKv(ctx: ActorContextHandle) {
+		return asNativeActorContext(this.#actorContext.getStore() ?? ctx).kv();
+	}
+
 	#actorSql(ctx: ActorContextHandle): NapiSqlDatabase {
-		const nativeCtx = asNativeActorContext(ctx);
+		const nativeCtx = asNativeActorContext(
+			this.#actorContext.getStore() ?? ctx,
+		);
 		let database = this.#sql.get(nativeCtx);
 		if (!database) {
 			database = nativeCtx.sql();
@@ -259,6 +275,10 @@ export class NapiCoreRuntime implements CoreRuntime {
 
 	async shutdownRegistry(registry: RegistryHandle): Promise<void> {
 		await asNativeRegistry(registry).shutdown();
+	}
+
+	async flushTelemetry(): Promise<void> {
+		await this.#bindings.flushTelemetry();
 	}
 
 	async registryActorStopThresholdMs(
@@ -615,7 +635,7 @@ export class NapiCoreRuntime implements CoreRuntime {
 		ctx: ActorContextHandle,
 		key: RuntimeBytes,
 	): Promise<RuntimeBytes | null> {
-		return await asNativeActorContext(ctx).kv().get(toNapiBuffer(key));
+		return await this.#actorKv(ctx).get(toNapiBuffer(key));
 	}
 
 	async actorKvPut(
@@ -623,16 +643,14 @@ export class NapiCoreRuntime implements CoreRuntime {
 		key: RuntimeBytes,
 		value: RuntimeBytes,
 	): Promise<void> {
-		await asNativeActorContext(ctx)
-			.kv()
-			.put(toNapiBuffer(key), toNapiBuffer(value));
+		await this.#actorKv(ctx).put(toNapiBuffer(key), toNapiBuffer(value));
 	}
 
 	async actorKvDelete(
 		ctx: ActorContextHandle,
 		key: RuntimeBytes,
 	): Promise<void> {
-		await asNativeActorContext(ctx).kv().delete(toNapiBuffer(key));
+		await this.#actorKv(ctx).delete(toNapiBuffer(key));
 	}
 
 	async actorKvDeleteRange(
@@ -640,9 +658,10 @@ export class NapiCoreRuntime implements CoreRuntime {
 		start: RuntimeBytes,
 		end: RuntimeBytes,
 	): Promise<void> {
-		await asNativeActorContext(ctx)
-			.kv()
-			.deleteRange(toNapiBuffer(start), toNapiBuffer(end));
+		await this.#actorKv(ctx).deleteRange(
+			toNapiBuffer(start),
+			toNapiBuffer(end),
+		);
 	}
 
 	async actorKvListPrefix(
@@ -650,8 +669,7 @@ export class NapiCoreRuntime implements CoreRuntime {
 		prefix: RuntimeBytes,
 		options?: RuntimeKvListOptions | undefined | null,
 	): Promise<RuntimeKvEntry[]> {
-		return await asNativeActorContext(ctx)
-			.kv()
+		return await this.#actorKv(ctx)
 			.listPrefix(toNapiBuffer(prefix), options);
 	}
 
@@ -661,8 +679,7 @@ export class NapiCoreRuntime implements CoreRuntime {
 		end: RuntimeBytes,
 		options?: RuntimeKvListOptions | undefined | null,
 	): Promise<RuntimeKvEntry[]> {
-		return await asNativeActorContext(ctx)
-			.kv()
+		return await this.#actorKv(ctx)
 			.listRange(toNapiBuffer(start), toNapiBuffer(end), options);
 	}
 
@@ -670,27 +687,21 @@ export class NapiCoreRuntime implements CoreRuntime {
 		ctx: ActorContextHandle,
 		keys: RuntimeBytes[],
 	): Promise<Array<RuntimeBytes | undefined | null>> {
-		return await asNativeActorContext(ctx)
-			.kv()
-			.batchGet(keys.map(toNapiBuffer));
+		return await this.#actorKv(ctx).batchGet(keys.map(toNapiBuffer));
 	}
 
 	async actorKvBatchPut(
 		ctx: ActorContextHandle,
 		entries: RuntimeKvEntry[],
 	): Promise<void> {
-		await asNativeActorContext(ctx)
-			.kv()
-			.batchPut(entries.map(toNapiKvEntry));
+		await this.#actorKv(ctx).batchPut(entries.map(toNapiKvEntry));
 	}
 
 	async actorKvBatchDelete(
 		ctx: ActorContextHandle,
 		keys: RuntimeBytes[],
 	): Promise<void> {
-		await asNativeActorContext(ctx)
-			.kv()
-			.batchDelete(keys.map(toNapiBuffer));
+		await this.#actorKv(ctx).batchDelete(keys.map(toNapiBuffer));
 	}
 
 	async actorSqlExec(

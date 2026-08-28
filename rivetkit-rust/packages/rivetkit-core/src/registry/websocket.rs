@@ -372,6 +372,7 @@ impl RegistryDispatcher {
 										conn.clone(),
 										request.name.clone(),
 										request.args.into_vec(),
+										None,
 									)
 									.await
 									{

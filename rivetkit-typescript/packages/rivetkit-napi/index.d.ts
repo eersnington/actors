@@ -277,6 +277,7 @@ export interface JsKvEntry {
   key: Buffer
   value: Buffer
 }
+export declare function flushTelemetry(): Promise<void>
 /** N-API wrapper around `rivetkit-core::ActorContext`. */
 export declare class ActorContext {
   state(): Buffer

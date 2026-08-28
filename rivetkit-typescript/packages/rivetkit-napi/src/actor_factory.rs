@@ -11,8 +11,8 @@ use rivet_error::{ActorSpecifier, RivetError, RivetErrorKind};
 use rivetkit_core::inspector::InspectorTabEntry;
 use rivetkit_core::{
 	ActionDefinition, ActorConfig, ActorConfigInput, ActorContext as CoreActorContext,
-	ActorFactory as CoreActorFactory, ConnHandle as CoreConnHandle, Request, Response,
-	WebSocket as CoreWebSocket,
+	ActorFactory as CoreActorFactory, ActorOperationTelemetry, ConnHandle as CoreConnHandle, Request,
+	Response, WebSocket as CoreWebSocket,
 };
 
 use crate::actor_context::{ActorContext, StateDeltaPayload};
@@ -190,6 +190,7 @@ pub(crate) struct ConnectionPayload {
 #[derive(Clone)]
 pub(crate) struct ActionPayload {
 	pub(crate) ctx: CoreActorContext,
+	pub(crate) telemetry: Option<ActorOperationTelemetry>,
 	pub(crate) conn: Option<CoreConnHandle>,
 	pub(crate) name: String,
 	pub(crate) args: Vec<u8>,
@@ -903,7 +904,10 @@ fn build_connection_payload(
 
 fn build_action_payload(env: &Env, payload: ActionPayload) -> napi::Result<Vec<napi::JsUnknown>> {
 	let mut object = env.create_object()?;
-	object.set("ctx", ActorContext::new(payload.ctx))?;
+	object.set(
+		"ctx",
+		ActorContext::new_with_telemetry(payload.ctx, payload.telemetry),
+	)?;
 	match payload.conn {
 		Some(conn) => object.set("conn", ConnHandle::new(conn))?,
 		None => object.set("conn", env.get_null()?)?,

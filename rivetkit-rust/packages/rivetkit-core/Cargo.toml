@@ -14,6 +14,10 @@ description = "Core runtime primitives for RivetKit actor hosts"
 default = ["native-runtime"]
 native-runtime = [
 	"dep:nix",
+	"dep:opentelemetry",
+	"dep:opentelemetry-otlp",
+	"dep:opentelemetry_sdk",
+	"dep:tracing-opentelemetry",
 	"dep:reqwest",
 	"dep:rivetkit-engine-process",
 	"dep:axum",
@@ -78,6 +82,10 @@ url.workspace = true
 vbare.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+opentelemetry = { version = "0.28", default-features = false, features = ["trace"], optional = true }
+opentelemetry-otlp = { version = "0.28", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"], optional = true }
+opentelemetry_sdk = { version = "0.28", default-features = false, features = ["trace"], optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
 tokio.workspace = true
 uuid.workspace = true
 
@@ -91,6 +99,7 @@ wasm-bindgen-futures = "0.4"
 web-time = "1.1"
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.28", default-features = false, features = ["trace"] }
 portpicker.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true

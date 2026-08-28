@@ -2110,6 +2110,7 @@ mod tests {
 		tx.send(ActorEvent::Action {
 			name: name.to_owned(),
 			args: args.to_vec(),
+			telemetry: None,
 			conn,
 			scheduled_fire: None,
 			reply: reply_tx.into(),

@@ -17,6 +17,7 @@ import {
 import { logger } from "./log";
 import { buildConfiguredRegistry } from "./native";
 import type {
+	CoreRuntime,
 	RuntimeApplicationFetch,
 	RuntimeServerlessResponseHead,
 } from "./runtime";
@@ -703,6 +704,7 @@ export class Registry<A extends RegistryActors> {
 			config.shutdown?.gracePeriodMs ??
 			(await this.#actorStopThresholdMs(modeAPromise ?? modeBPromise)) ??
 			30 * 60 * 1000;
+		let runtimeForTelemetryFlush: CoreRuntime | undefined;
 		// Race the entire drain sequence (both modes + serve promise) against
 		// a single grace ceiling. By default, this uses the engine-provided
 		// actor stop threshold, matching Pegboard's hard cutoff for actors.
@@ -717,6 +719,7 @@ export class Registry<A extends RegistryActors> {
 					(async () => {
 						try {
 							const { runtime, registry } = await modeAPromise;
+							runtimeForTelemetryFlush ??= runtime;
 							await runtime.shutdownRegistry(registry);
 						} catch (err) {
 							logger().warn(
@@ -732,6 +735,7 @@ export class Registry<A extends RegistryActors> {
 					(async () => {
 						try {
 							const { runtime, registry } = await modeBPromise;
+							runtimeForTelemetryFlush ??= runtime;
 							await runtime.shutdownRegistry(registry);
 						} catch (err) {
 							logger().warn(
@@ -761,6 +765,11 @@ export class Registry<A extends RegistryActors> {
 				setTimeout(resolve, gracePeriodMs).unref?.(),
 			),
 		]);
+		try {
+			await runtimeForTelemetryFlush?.flushTelemetry?.();
+		} catch (err) {
+			logger().warn({ err }, "telemetry flush errored");
+		}
 	}
 
 	async #actorStopThresholdMs(

@@ -4916,25 +4916,30 @@ export function buildNativeFactory(
 					) => {
 						const { ctx, conn, args, scheduledFire, cancelToken } =
 							unwrapTsfnPayload(error, payload);
-						const actorCtx =
-							conn != null
-								? makeConnCtx(ctx, conn, undefined, cancelToken)
-								: makeActorCtx(ctx, undefined, cancelToken);
-						try {
-							return encodeValue(
-								await handler(
-									actorCtx,
-									...validateActionArgs(
-										schemaConfig.actionInputSchemas,
-										name,
-										decodeArgs(args),
+						const runAction = async () => {
+							const actorCtx =
+								conn != null
+									? makeConnCtx(ctx, conn, undefined, cancelToken)
+									: makeActorCtx(ctx, undefined, cancelToken);
+							try {
+								return encodeValue(
+									await handler(
+										actorCtx,
+										...validateActionArgs(
+											schemaConfig.actionInputSchemas,
+											name,
+											decodeArgs(args),
+										),
+										...(scheduledFire ? [scheduledFire] : []),
 									),
-									...(scheduledFire ? [scheduledFire] : []),
-								),
-							);
-						} finally {
-							await actorCtx.dispose();
-						}
+								);
+							} finally {
+								await actorCtx.dispose();
+							}
+						};
+						return runtime.runWithActorContext
+							? await runtime.runWithActorContext(ctx, runAction)
+							: await runAction();
 					},
 				),
 			]),

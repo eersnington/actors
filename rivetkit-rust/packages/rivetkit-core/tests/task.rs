@@ -8,7 +8,11 @@ pub(crate) mod moved_tests {
 	use std::task::Poll;
 	use std::time::{Duration, Instant};
 
+	use axum::{Router, body::Bytes, routing::post};
 	use futures::{FutureExt, poll};
+	use opentelemetry_sdk::trace::SdkTracer;
+	use parking_lot::Mutex as ParkingLotMutex;
+	use rivet_error::{RivetError, RivetErrorKind};
 	use rivet_envoy_client::config::{
 		BoxFuture as EnvoyBoxFuture, EnvoyCallbacks, EnvoyConfig, HttpRequest, HttpResponse,
 		WebSocketHandler, WebSocketSender,
@@ -21,6 +25,7 @@ pub(crate) mod moved_tests {
 		RemoteSqliteRequest, RemoteSqliteResponse, RemoteSqliteResponseEnvelope,
 	};
 	use rusqlite::types::{Value, ValueRef};
+	use tokio::net::TcpListener;
 	use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 	use tokio::task::yield_now;
 	use tokio::time::{advance, sleep, timeout};
@@ -30,6 +35,7 @@ pub(crate) mod moved_tests {
 	use tracing_subscriber::layer::{Context as LayerContext, Layer};
 	use tracing_subscriber::prelude::*;
 	use tracing_subscriber::registry::Registry;
+	use tracing_subscriber::filter::Targets;
 
 	use crate::actor::connection::{
 		ConnHandle, HibernatableConnectionMetadata, PersistedConnection,
@@ -49,7 +55,7 @@ pub(crate) mod moved_tests {
 	use crate::actor::task_types::ShutdownKind;
 	use crate::kv::tests::new_in_memory;
 	use crate::sqlite::{ColumnValue, SqliteDb};
-	use crate::types::ActorKey;
+	use crate::types::{ActorKey, ActorKeySegment};
 	use crate::{ActorConfig, ActorContext, ActorFactory};
 
 	fn test_hook_lock() -> &'static AsyncMutex<()> {
@@ -196,6 +202,18 @@ pub(crate) mod moved_tests {
 		mpsc::UnboundedSender<DispatchCommand>,
 		mpsc::UnboundedSender<LifecycleEvent>,
 	) {
+		new_task_with_factory_and_senders(ctx, noop_factory())
+	}
+
+	fn new_task_with_factory_and_senders(
+		ctx: ActorContext,
+		factory: Arc<ActorFactory>,
+	) -> (
+		ActorTask,
+		mpsc::UnboundedSender<LifecycleCommand>,
+		mpsc::UnboundedSender<DispatchCommand>,
+		mpsc::UnboundedSender<LifecycleEvent>,
+	) {
 		let (lifecycle_tx, lifecycle_rx) = mpsc::unbounded_channel();
 		let (dispatch_tx, dispatch_rx) = mpsc::unbounded_channel();
 		let (events_tx, events_rx) = mpsc::unbounded_channel();
@@ -206,7 +224,7 @@ pub(crate) mod moved_tests {
 				lifecycle_rx,
 				dispatch_rx,
 				events_rx,
-				noop_factory(),
+				factory,
 				ctx,
 				None,
 			),
@@ -1903,6 +1921,7 @@ pub(crate) mod moved_tests {
 		task.handle_dispatch(DispatchCommand::Action {
 			name: "client-action".to_owned(),
 			args: Vec::new(),
+			ray_id: None,
 			conn: client_conn,
 			reply: reply_tx,
 		})
@@ -2006,6 +2025,7 @@ pub(crate) mod moved_tests {
 		task.handle_dispatch(DispatchCommand::Action {
 			name: "slow-action".to_owned(),
 			args: Vec::new(),
+			ray_id: None,
 			conn: client_conn,
 			reply: reply_tx,
 		})
@@ -3278,6 +3298,7 @@ pub(crate) mod moved_tests {
 			.send(DispatchCommand::Action {
 				name: "ping".to_owned(),
 				args: Vec::new(),
+				ray_id: None,
 				conn: ConnHandle::new("conn-grace", Vec::new(), Vec::new(), false),
 				reply: action_tx,
 			})
@@ -3322,6 +3343,7 @@ pub(crate) mod moved_tests {
 		task.handle_dispatch(DispatchCommand::Action {
 			name: "ping".to_owned(),
 			args: Vec::new(),
+			ray_id: None,
 			conn: ConnHandle::new("conn-finalize", Vec::new(), Vec::new(), false),
 			reply: reply_tx,
 		})
@@ -4073,6 +4095,7 @@ pub(crate) mod moved_tests {
 			.send(DispatchCommand::Action {
 				name: "ping".to_owned(),
 				args: Vec::new(),
+				ray_id: None,
 				conn: ConnHandle::new("conn-log-flow", Vec::new(), Vec::new(), false),
 				reply: action_tx,
 			})
@@ -4148,6 +4171,201 @@ pub(crate) mod moved_tests {
 			}),
 			"expected `actor event drained` log for actor-log-flow; logs={logs:?}"
 		);
+	}
+
+	async fn run_action_with_tracer(
+		action_result: anyhow::Result<Vec<u8>>,
+		tracer: SdkTracer,
+		ray_id: Option<String>,
+	) -> anyhow::Result<Vec<u8>> {
+		let _hook_lock = test_hook_lock().lock().await;
+		let ctx = new_with_kv(
+			"actor-telemetry",
+			"telemetry-counter",
+			vec![ActorKeySegment::String("counter-key".to_owned())],
+			"local",
+			new_in_memory(),
+		);
+		let result = Arc::new(ParkingLotMutex::new(Some(action_result)));
+		let factory = Arc::new(ActorFactory::new(Default::default(), move |start| {
+			let result = result.clone();
+			Box::pin(async move {
+				let mut events = start.events;
+				while let Some(event) = events.recv().await {
+					match event {
+						ActorEvent::Action { reply, .. } => {
+							let result = result
+								.lock()
+								.take()
+								.expect("action should run once");
+							reply.send(result);
+						}
+						ActorEvent::RunGracefulCleanup { reply, .. } => {
+							reply.send(Ok(()));
+							break;
+						}
+						_ => {}
+					}
+				}
+				Ok(())
+			})
+		}));
+		let (task, lifecycle_tx, dispatch_tx, events_tx) =
+			new_task_with_factory_and_senders(ctx.clone(), factory);
+		ctx.configure_lifecycle_events(Some(events_tx));
+		let targets = Targets::new().with_target("rivetkit::telemetry", tracing::Level::INFO);
+		let subscriber = Registry::default().with(
+			tracing_opentelemetry::layer()
+				.with_tracer(tracer)
+				.with_filter(targets),
+		);
+		let dispatch = tracing::Dispatch::new(subscriber);
+		let _guard = tracing::dispatcher::set_default(&dispatch);
+		let run = tokio::spawn(task.run().with_subscriber(dispatch));
+
+		let (start_tx, start_rx) = oneshot::channel();
+		lifecycle_tx
+			.send(LifecycleCommand::Start { reply: start_tx })
+			.expect("start command should send");
+		start_rx
+			.await
+			.expect("start reply should send")
+			.expect("start should succeed");
+		let (action_tx, action_rx) = oneshot::channel();
+		dispatch_tx
+			.send(DispatchCommand::Action {
+				name: "increment".to_owned(),
+				args: Vec::new(),
+				ray_id,
+				conn: ConnHandle::new("conn-telemetry", Vec::new(), Vec::new(), false),
+				reply: action_tx,
+			})
+			.expect("action command should send");
+		let action_result = action_rx.await.expect("action reply should send");
+		let (stop_tx, stop_rx) = oneshot::channel();
+		lifecycle_tx
+			.send(LifecycleCommand::Stop {
+				reason: ShutdownKind::Destroy,
+				reply: stop_tx,
+			})
+			.expect("stop command should send");
+		stop_rx
+			.await
+			.expect("stop reply should send")
+			.expect("stop should succeed");
+		run.await
+			.expect("task join should succeed")
+			.expect("task should succeed");
+		action_result
+	}
+
+	#[tokio::test]
+	async fn failed_action_exports_bounded_otlp_span_without_changing_error() {
+		const RAY_ID: &str = "pawyxmuehh6fvlhr87xq9hqn670000";
+		// This subprocess is the only test of the production HTTP exporter feature
+		// combination. It also isolates process-global environment and provider state.
+		if std::env::var_os("RIVETKIT_ACTOR_OTLP_TEST_CHILD").is_some() {
+			let tracer = crate::telemetry::initialize_if_configured()
+				.expect("telemetry should initialize")
+				.expect("telemetry should be enabled");
+			let action_error = anyhow::Error::new(RivetError {
+				kind: RivetErrorKind::Dynamic {
+					group: "user-controlled-group".to_owned(),
+					code: "user-controlled-code".to_owned(),
+					default_message: "dynamic error".to_owned(),
+				},
+				meta: None,
+				message: None,
+				actor: None,
+			});
+			let error = run_action_with_tracer(
+				Err(action_error),
+				tracer,
+				Some(RAY_ID.to_owned()),
+			)
+			.await
+			.expect_err("action error should reach the caller");
+			let structured = RivetError::extract(&error);
+			assert_eq!(structured.group(), "user-controlled-group");
+			assert_eq!(structured.code(), "user-controlled-code");
+			crate::telemetry::flush_best_effort(Duration::from_secs(5)).await;
+			return;
+		}
+
+		let (request_tx, request_rx) = oneshot::channel();
+		let request_tx = Arc::new(AsyncMutex::new(Some(request_tx)));
+		let app = Router::new().route(
+			"/v1/traces",
+			post(move |body: Bytes| {
+				let request_tx = request_tx.clone();
+				async move {
+					if let Some(request_tx) = request_tx.lock().await.take() {
+						let _ = request_tx.send(body.to_vec());
+					}
+				}
+			}),
+		);
+		let listener = TcpListener::bind("127.0.0.1:0")
+			.await
+			.expect("collector should bind");
+		let collector_address = listener.local_addr().expect("collector should have an address");
+		let collector = tokio::spawn(async move {
+			axum::serve(listener, app)
+				.await
+				.expect("collector should serve");
+		});
+
+		let test_binary = std::env::current_exe().expect("test binary path should resolve");
+		let test_name = std::thread::current()
+			.name()
+			.expect("test thread should be named")
+			.to_owned();
+		let child = tokio::task::spawn_blocking(move || {
+			Command::new(test_binary)
+				.arg(test_name)
+				.arg("--exact")
+				.arg("--nocapture")
+				.env("RIVETKIT_ACTOR_OTLP_TEST_CHILD", "1")
+				.env_remove("OTEL_SDK_DISABLED")
+				.env("OTEL_SERVICE_NAME", "rivetkit-actor-otlp-test")
+				.env("OTEL_TRACES_SAMPLER", "always_on")
+				.env(
+					"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+					format!("http://{collector_address}/v1/traces"),
+				)
+				.status()
+		})
+		.await
+		.expect("child test process should join")
+		.expect("child test process should start");
+		assert!(child.success(), "child test process should pass");
+
+		let request = timeout(Duration::from_secs(5), request_rx)
+			.await
+			.expect("collector should receive an export")
+			.expect("collector request channel should remain open");
+		collector.abort();
+		for expected in [
+			b"telemetry-counter.increment".as_slice(),
+			b"rivetkit-actor-otlp-test".as_slice(),
+			b"rivet.actor.id".as_slice(),
+			b"actor-telemetry".as_slice(),
+			b"rivet.actor.name".as_slice(),
+			b"telemetry-counter".as_slice(),
+			b"rivet.actor.key".as_slice(),
+			b"counter-key".as_slice(),
+			b"rivet.action.name".as_slice(),
+			b"increment".as_slice(),
+			b"rivet.ray.id".as_slice(),
+			RAY_ID.as_bytes(),
+			b"actor.action_failed".as_slice(),
+		] {
+			assert!(
+				request.windows(expected.len()).any(|window| window == expected),
+				"OTLP request should contain {}",
+				String::from_utf8_lossy(expected),
+			);
+		}
 	}
 
 	#[tokio::test]

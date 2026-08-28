@@ -18,8 +18,9 @@ use napi_derive::napi;
 use parking_lot::Mutex;
 use rivetkit_core::types::ActorKeySegment;
 use rivetkit_core::{
-	ActorContext as CoreActorContext, ActorWorkKind, ConnHandle as CoreConnHandle, KeepAwakeRegion,
-	Request as CoreRequest, RequestSaveOpts, StateDelta, WebSocketCallbackRegion, WorkflowKvWrite,
+	ActorContext as CoreActorContext, ActorOperationTelemetry, ActorWorkKind,
+	ConnHandle as CoreConnHandle, KeepAwakeRegion, Request as CoreRequest, RequestSaveOpts,
+	StateDelta, WebSocketCallbackRegion, WorkflowKvWrite,
 };
 use scc::HashMap as SccHashMap;
 use tokio::sync::mpsc::UnboundedSender;
@@ -48,6 +49,7 @@ static ACTOR_CONTEXT_SHARED: LazyLock<SccHashMap<String, Weak<ActorContextShared
 pub struct ActorContext {
 	inner: CoreActorContext,
 	shared: Arc<ActorContextShared>,
+	telemetry: Option<ActorOperationTelemetry>,
 }
 
 #[derive(Default)]
@@ -152,6 +154,13 @@ struct DisconnectPredicatePayload {
 
 impl ActorContext {
 	pub(crate) fn new(inner: CoreActorContext) -> Self {
+		Self::new_with_telemetry(inner, None)
+	}
+
+	pub(crate) fn new_with_telemetry(
+		inner: CoreActorContext,
+		telemetry: Option<ActorOperationTelemetry>,
+	) -> Self {
 		let actor_id = inner.actor_id().to_owned();
 		let shared = actor_context_shared(&actor_id);
 		tracing::debug!(
@@ -160,7 +169,11 @@ impl ActorContext {
 			shared_strong_count = Arc::strong_count(&shared),
 			"constructed napi class"
 		);
-		Self { inner, shared }
+		Self {
+			inner,
+			shared,
+			telemetry,
+		}
 	}
 
 	#[allow(dead_code)]
@@ -267,7 +280,7 @@ impl ActorContext {
 	// TypeScript compatibility while steering new code to SQLite or actor state.
 	#[allow(deprecated)]
 	pub fn kv(&self) -> Kv {
-		Kv::new(self.inner.clone())
+		Kv::new(self.inner.clone(), self.telemetry.clone())
 	}
 
 	#[napi]
@@ -275,6 +288,7 @@ impl ActorContext {
 		JsNativeDatabase::new(
 			self.inner.sql().clone(),
 			Some(self.inner.actor_id().to_owned()),
+			self.telemetry.clone(),
 		)
 	}
 

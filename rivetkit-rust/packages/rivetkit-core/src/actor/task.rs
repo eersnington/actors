@@ -38,6 +38,7 @@ use anyhow::{Context, Result, anyhow};
 use futures::FutureExt;
 #[cfg(test)]
 use parking_lot::Mutex;
+use rivet_error::RivetError;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 use tracing::{Instrument, instrument::WithSubscriber};
@@ -55,7 +56,7 @@ use crate::actor::metrics::startup_phase::StartupPhase;
 use crate::actor::state::PersistedActor;
 use crate::actor::task_types::ShutdownKind;
 use crate::actor::work_registry::ActorWorkKind;
-use crate::error::{ActorLifecycle as ActorLifecycleError, ActorRuntime};
+use crate::error::{ActorLifecycle as ActorLifecycleError, ActorRuntime, is_internal_error};
 use crate::runtime::RuntimeSpawner;
 #[cfg(test)]
 use crate::time::sleep;
@@ -201,6 +202,7 @@ pub enum DispatchCommand {
 	Action {
 		name: String,
 		args: Vec<u8>,
+		ray_id: Option<String>,
 		conn: ConnHandle,
 		reply: oneshot::Sender<Result<Vec<u8>>>,
 	},
@@ -889,9 +891,50 @@ impl ActorTask {
 			DispatchCommand::Action {
 				name,
 				args,
+				ray_id,
 				conn,
 				reply,
 			} => {
+				#[cfg(not(feature = "native-runtime"))]
+				let _ = ray_id;
+				#[cfg(feature = "native-runtime")]
+				let telemetry_enabled = tracing::enabled!(
+					target: "rivetkit::telemetry",
+					tracing::Level::INFO
+				);
+				#[cfg(feature = "native-runtime")]
+				let (telemetry_span, operation_telemetry) = if telemetry_enabled {
+					let actor_key = format_actor_key(self.ctx.key());
+					let ray_id = ray_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+					let span_name = format!("{}.{}", self.ctx.name(), name);
+					let span = tracing::info_span!(
+						target: "rivetkit::telemetry",
+						parent: None,
+						"rivet.actor.invoke",
+						otel.name = %span_name,
+						otel.kind = "server",
+						rivet.invocation.type = "action",
+						rivet.actor.id = %self.ctx.actor_id(),
+						rivet.actor.name = %self.ctx.name(),
+						rivet.actor.key = %actor_key,
+						rivet.action.name = %name,
+						rivet.ray.id = %ray_id,
+						otel.status_code = tracing::field::Empty,
+						error.type = tracing::field::Empty,
+					);
+					let operation_telemetry = crate::telemetry::ActorOperationTelemetry::new(
+						span.clone(),
+						ray_id,
+						self.ctx.actor_id().to_owned(),
+						self.ctx.name().to_owned(),
+						actor_key,
+					);
+					(span, Some(operation_telemetry))
+				} else {
+					(tracing::Span::none(), None)
+				};
+				#[cfg(not(feature = "native-runtime"))]
+				let telemetry_span = tracing::Span::none();
 				tracing::info!(
 					actor_id = %self.ctx.actor_id(),
 					action_name = %name,
@@ -906,6 +949,8 @@ impl ActorTask {
 					ActorEvent::Action {
 						name,
 						args,
+						#[cfg(feature = "native-runtime")]
+						telemetry: operation_telemetry,
 						conn: Some(conn),
 						scheduled_fire: None,
 						reply: Reply::from(tracked_reply_tx),
@@ -920,11 +965,28 @@ impl ActorTask {
 						self.log_dispatch_command_handled(command_kind, "enqueued");
 						let actor_id = self.ctx.actor_id().to_owned();
 						let ctx = self.ctx.clone();
+						let invocation_span = telemetry_span.clone();
 						self.ctx.spawn_work(ActorWorkKind::Action, async move {
 							match tracked_reply_rx.await {
 								Ok(result) => {
 									let result =
 										result.map_err(|error| ctx.attach_actor_to_error(error));
+									if let Err(error) = &result {
+										invocation_span.record("otel.status_code", "ERROR");
+										let structured = RivetError::extract(error);
+										if is_internal_error(structured.group(), structured.code())
+											|| structured.schema().is_none()
+										{
+											invocation_span
+												.record("error.type", "actor.action_failed");
+										} else {
+											let error_type =
+												format!("{}.{}", structured.group(), structured.code());
+											invocation_span.record("error.type", error_type.as_str());
+										}
+									} else {
+										invocation_span.record("otel.status_code", "OK");
+									}
 									tracing::info!(
 										actor_id = %actor_id,
 										action_name = %action_name_for_log,
@@ -934,6 +996,8 @@ impl ActorTask {
 									let _ = reply.send(result);
 								}
 								Err(_) => {
+									invocation_span.record("otel.status_code", "ERROR");
+									invocation_span.record("error.type", "actor.dropped_reply");
 									tracing::warn!(
 										actor_id = %actor_id,
 										action_name = %action_name_for_log,
@@ -945,9 +1009,12 @@ impl ActorTask {
 									let _ = reply.send(Err(error));
 								}
 							}
-						});
+						}
+						.instrument(telemetry_span));
 					}
 					Err(error) => {
+						telemetry_span.record("otel.status_code", "ERROR");
+						telemetry_span.record("error.type", "actor.dispatch_failed");
 						tracing::warn!(
 							actor_id = %self.ctx.actor_id(),
 							action_name = %action_name_for_log,

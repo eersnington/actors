@@ -374,6 +374,7 @@ pub(crate) async fn dispatch_event(
 		ActorEvent::Action {
 			name,
 			args,
+			telemetry,
 			conn,
 			scheduled_fire,
 			reply,
@@ -410,6 +411,7 @@ pub(crate) async fn dispatch_event(
 						call_action(
 							&callback,
 							&ctx,
+							telemetry,
 							conn,
 							name.clone(),
 							args.clone(),
@@ -1123,6 +1125,7 @@ async fn call_run(
 async fn call_action(
 	callback: &crate::actor_factory::CallbackTsfn<ActionPayload>,
 	ctx: &ActorContext,
+	telemetry: Option<rivetkit_core::ActorOperationTelemetry>,
 	conn: Option<rivetkit_core::ConnHandle>,
 	name: String,
 	args: Vec<u8>,
@@ -1135,6 +1138,7 @@ async fn call_action(
 		callback,
 		ActionPayload {
 			ctx: ctx.inner().clone(),
+			telemetry,
 			conn,
 			name,
 			args,

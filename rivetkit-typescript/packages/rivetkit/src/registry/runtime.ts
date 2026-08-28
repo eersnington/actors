@@ -417,6 +417,10 @@ export type RuntimeWebSocketEvent =
 
 export interface CoreRuntime {
 	readonly kind: "napi" | "wasm";
+	runWithActorContext?<T>(
+		ctx: ActorContextHandle,
+		callback: () => Promise<T>,
+	): Promise<T>;
 
 	createRegistry(): RegistryHandle;
 	registerActor(
@@ -430,6 +434,7 @@ export interface CoreRuntime {
 	): Promise<void>;
 	waitRegistryReady(registry: RegistryHandle): Promise<void>;
 	shutdownRegistry(registry: RegistryHandle): Promise<void>;
+	flushTelemetry?(): Promise<void>;
 	registryActorStopThresholdMs?(
 		registry: RegistryHandle,
 	): Promise<number | undefined>;

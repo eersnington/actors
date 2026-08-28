@@ -8,6 +8,7 @@ use ::http;
 const HEADER_RIVET_ACTOR: &str = "x-rivet-actor";
 const HEADER_RIVET_ACTOR_GENERATION: &str = "x-rivet-actor-generation";
 const HEADER_RIVET_ACTOR_KEY: &str = "x-rivet-actor-key";
+const HEADER_RIVET_RAY_ID: &str = "x-rivet-ray-id";
 
 impl RegistryDispatcher {
 	pub(super) async fn handle_fetch(
@@ -205,6 +206,11 @@ impl RegistryDispatcher {
 				conn.clone(),
 				action_name.clone(),
 				args,
+				request
+					.headers()
+					.get(HEADER_RIVET_RAY_ID)
+					.and_then(|value| value.to_str().ok())
+					.map(str::to_owned),
 			),
 		)
 		.await;

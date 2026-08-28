@@ -166,6 +166,7 @@ mod moved_tests {
 			ActorEvent::Action {
 				name: "missing".to_owned(),
 				args: vec![1, 2, 3],
+				telemetry: None,
 				conn: None,
 				scheduled_fire: None,
 				reply: tx.into(),
@@ -433,6 +434,7 @@ mod moved_tests {
 			.send(ActorEvent::Action {
 				name: "missing-first".to_owned(),
 				args: Vec::new(),
+				telemetry: None,
 				conn: None,
 				scheduled_fire: None,
 				reply: first_tx.into(),
@@ -442,6 +444,7 @@ mod moved_tests {
 			.send(ActorEvent::Action {
 				name: "missing-second".to_owned(),
 				args: Vec::new(),
+				telemetry: None,
 				conn: None,
 				scheduled_fire: None,
 				reply: second_tx.into(),

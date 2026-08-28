@@ -1617,6 +1617,8 @@ impl ActorContext {
 				ActorEvent::Action {
 					name: action.clone(),
 					args,
+					#[cfg(feature = "native-runtime")]
+					telemetry: None,
 					conn: None,
 					scheduled_fire: Some(scheduled_fire),
 					reply: Reply::from(reply_tx),

@@ -277,6 +277,8 @@ pub enum ActorEvent {
 	Action {
 		name: String,
 		args: Vec<u8>,
+		#[cfg(feature = "native-runtime")]
+		telemetry: Option<crate::telemetry::ActorOperationTelemetry>,
 		conn: Option<ConnHandle>,
 		scheduled_fire: Option<ScheduledFireInfo>,
 		reply: Reply<Vec<u8>>,

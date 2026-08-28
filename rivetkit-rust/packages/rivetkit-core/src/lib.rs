@@ -16,6 +16,8 @@ pub(crate) mod serde_metrics;
 pub mod serverless;
 #[cfg(feature = "native-runtime")]
 pub mod serverless_http;
+#[cfg(feature = "native-runtime")]
+pub mod telemetry;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 pub(crate) mod time {
@@ -116,6 +118,8 @@ pub(crate) mod time {
 pub mod types;
 pub mod websocket;
 pub use actor::{kv, sqlite};
+#[cfg(feature = "native-runtime")]
+pub use telemetry::ActorOperationTelemetry;
 
 pub use actor::action::ActionDispatchError;
 pub use actor::config::{
