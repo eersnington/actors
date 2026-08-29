@@ -295,7 +295,6 @@ type NativeDatabaseClientState = {
 	client: unknown;
 };
 type NativeActorRuntimeState = {
-	sql?: ReturnType<typeof wrapJsNativeDatabase>;
 	databaseClient?: NativeDatabaseClientState;
 	varsInitialized?: boolean;
 	vars?: unknown;
@@ -492,15 +491,8 @@ async function cleanupNativeSleepRuntimeState(
 function closeNativeSqlDatabase(
 	runtime: CoreRuntime,
 	ctx: ActorContextHandle,
-): Promise<void> | undefined {
-	const runtimeState = getNativeRuntimeState(runtime, ctx);
-	const database = runtimeState.sql;
-	if (!database) {
-		return;
-	}
-
-	runtimeState.sql = undefined;
-	return database.close();
+): Promise<void> {
+	return createNativeSqlDatabase(runtime, ctx).close();
 }
 
 async function closeNativeDatabaseClient(
@@ -525,17 +517,11 @@ async function closeNativeDatabaseClient(
 	}
 }
 
-function getOrCreateNativeSqlDatabase(
+function createNativeSqlDatabase(
 	runtime: CoreRuntime,
 	ctx: ActorContextHandle,
 ): ReturnType<typeof wrapJsNativeDatabase> {
-	const runtimeState = getNativeRuntimeState(runtime, ctx);
-	const cachedDatabase = runtimeState.sql;
-	if (cachedDatabase) {
-		return cachedDatabase;
-	}
-
-	const database = wrapJsNativeDatabase({
+	return wrapJsNativeDatabase({
 		exec: (sql) => runtime.actorSqlExec(ctx, sql),
 		execute: (sql, params) => runtime.actorSqlExecute(ctx, sql, params),
 		executeBatch: (statements) =>
@@ -565,8 +551,6 @@ function getOrCreateNativeSqlDatabase(
 		takeLastKvError: () => runtime.actorSqlTakeLastKvError(ctx),
 		close: () => runtime.actorSqlClose(ctx),
 	});
-	runtimeState.sql = database;
-	return database;
 }
 
 function toRuntimeBytes(
@@ -2656,7 +2640,7 @@ export class ActorContextHandleAdapter {
 
 	get sql() {
 		if (!this.#sql) {
-			this.#sql = getOrCreateNativeSqlDatabase(this.#runtime, this.#ctx);
+			this.#sql = createNativeSqlDatabase(this.#runtime, this.#ctx);
 		}
 		return this.#sql;
 	}
@@ -2919,7 +2903,7 @@ export class ActorContextHandleAdapter {
 			nativeDatabaseProvider: {
 				open: async (requestedActorId) => {
 					void requestedActorId;
-					return getOrCreateNativeSqlDatabase(
+					return createNativeSqlDatabase(
 						this.#runtime,
 						this.#ctx,
 					);

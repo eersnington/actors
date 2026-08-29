@@ -4036,6 +4036,7 @@ pub(crate) mod moved_tests {
 	}
 
 	#[tokio::test(flavor = "current_thread")]
+	#[allow(deprecated)]
 	async fn actor_task_logs_lifecycle_dispatch_and_actor_event_flow() {
 		let _hook_lock = test_hook_lock().lock().await;
 		let ctx = new_with_kv(
@@ -4051,17 +4052,25 @@ pub(crate) mod moved_tests {
 		ctx.configure_lifecycle_events(Some(events_tx));
 		let retained_telemetry = Arc::new(Mutex::new(None));
 		let retained_for_actor = retained_telemetry.clone();
+		let action_ctx = ctx.clone();
 		let factory = Arc::new(ActorFactory::new(Default::default(), move |start| {
 			let retained_telemetry = retained_for_actor.clone();
+			let action_ctx = action_ctx.clone();
 			Box::pin(async move {
 				let mut events = start.events;
 				while let Some(event) = events.recv().await {
 					match event {
 						ActorEvent::Action { reply, .. } => {
+							let telemetry = reply.invocation_telemetry();
 							*retained_telemetry
 								.lock()
-								.expect("retained telemetry lock poisoned") =
-								reply.invocation_telemetry();
+								.expect("retained telemetry lock poisoned") = telemetry.clone();
+							action_ctx
+								.kv()
+								.clone()
+								.with_invocation_telemetry(telemetry)
+								.put(b"block", b"stone")
+								.await?;
 							reply.send(Ok(vec![1]));
 						}
 						ActorEvent::RunGracefulCleanup { reply, .. } => {
@@ -4166,6 +4175,13 @@ pub(crate) mod moved_tests {
 				.expect("retained telemetry lock poisoned")
 				.is_some(),
 			"retaining the callback context must not keep the action span open"
+		);
+		assert!(
+			spans.iter().any(|span| {
+				span.name == "rivet.kv.put"
+					&& span.parent_span_id == action_span.span_context.span_id()
+			}),
+			"KV operation should export as a child of the actor action"
 		);
 		drop(spans);
 

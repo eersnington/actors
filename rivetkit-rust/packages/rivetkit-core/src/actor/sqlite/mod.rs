@@ -175,6 +175,7 @@ pub struct SqliteDb {
 	/// always sets up sqlite storage under the hood, so handle/actor_id are
 	/// not a reliable signal for whether the user opted in; this flag is.
 	enabled: bool,
+	telemetry: Option<crate::telemetry::ActorInvocationTelemetry>,
 	#[cfg(feature = "sqlite-local")]
 	// Forced-sync: native SQLite handles are used inside spawn_blocking and
 	// synchronous diagnostic accessors.
@@ -209,6 +210,7 @@ impl SqliteDb {
 			generation,
 			backend: select_sqlite_backend(remote_sqlite)?,
 			enabled,
+			telemetry: None,
 			#[cfg(feature = "sqlite-local")]
 			db: Default::default(),
 			#[cfg(feature = "sqlite-local")]
@@ -359,6 +361,13 @@ impl SqliteDb {
 
 	pub async fn exec(&self, sql: impl Into<String>) -> Result<QueryResult> {
 		let sql = sql.into();
+		match &self.telemetry {
+			Some(telemetry) => telemetry.trace("sqlite", "exec", self.exec_untraced(sql)).await,
+			None => self.exec_untraced(sql).await,
+		}
+	}
+
+	async fn exec_untraced(&self, sql: String) -> Result<QueryResult> {
 		let sql_for_log = sql.clone();
 		let result = match self.begin_regular_operation().await {
 			Ok(_guard) => self.exec_backend(sql).await,
@@ -380,6 +389,21 @@ impl SqliteDb {
 		params: Option<Vec<BindParam>>,
 	) -> Result<QueryResult> {
 		let sql = sql.into();
+		match &self.telemetry {
+			Some(telemetry) => {
+				telemetry
+					.trace("sqlite", "query", self.query_untraced(sql, params))
+					.await
+			}
+			None => self.query_untraced(sql, params).await,
+		}
+	}
+
+	async fn query_untraced(
+		&self,
+		sql: String,
+		params: Option<Vec<BindParam>>,
+	) -> Result<QueryResult> {
 		let sql_for_log = sql.clone();
 		let binding_count = bind_param_count(&params);
 		let result = match self.begin_regular_operation().await {
@@ -402,6 +426,21 @@ impl SqliteDb {
 		params: Option<Vec<BindParam>>,
 	) -> Result<ExecResult> {
 		let sql = sql.into();
+		match &self.telemetry {
+			Some(telemetry) => {
+				telemetry
+					.trace("sqlite", "run", self.run_untraced(sql, params))
+					.await
+			}
+			None => self.run_untraced(sql, params).await,
+		}
+	}
+
+	async fn run_untraced(
+		&self,
+		sql: String,
+		params: Option<Vec<BindParam>>,
+	) -> Result<ExecResult> {
 		let sql_for_log = sql.clone();
 		let binding_count = bind_param_count(&params);
 		let result = match self.begin_regular_operation().await {
@@ -424,6 +463,21 @@ impl SqliteDb {
 		params: Option<Vec<BindParam>>,
 	) -> Result<ExecuteResult> {
 		let sql = sql.into();
+		match &self.telemetry {
+			Some(telemetry) => {
+				telemetry
+					.trace("sqlite", "execute", self.execute_untraced(sql, params))
+					.await
+			}
+			None => self.execute_untraced(sql, params).await,
+		}
+	}
+
+	async fn execute_untraced(
+		&self,
+		sql: String,
+		params: Option<Vec<BindParam>>,
+	) -> Result<ExecuteResult> {
 		let sql_for_log = sql.clone();
 		let binding_count = bind_param_count(&params);
 		let result = match self.begin_regular_operation().await {
@@ -441,6 +495,20 @@ impl SqliteDb {
 	}
 
 	pub async fn execute_batch(
+		&self,
+		statements: Vec<SqliteBatchStatement>,
+	) -> Result<Vec<ExecuteResult>> {
+		match &self.telemetry {
+			Some(telemetry) => {
+				telemetry
+					.trace("sqlite", "execute_batch", self.execute_batch_untraced(statements))
+					.await
+			}
+			None => self.execute_batch_untraced(statements).await,
+		}
+	}
+
+	async fn execute_batch_untraced(
 		&self,
 		statements: Vec<SqliteBatchStatement>,
 	) -> Result<Vec<ExecuteResult>> {
@@ -496,6 +564,14 @@ impl SqliteDb {
 				Err(error)
 			}
 		}
+	}
+
+	pub fn with_invocation_telemetry(
+		mut self,
+		telemetry: Option<crate::telemetry::ActorInvocationTelemetry>,
+	) -> Self {
+		self.telemetry = telemetry;
+		self
 	}
 
 	pub async fn close(&self) -> Result<()> {
