@@ -201,6 +201,9 @@ pub enum DispatchCommand {
 	Action {
 		name: String,
 		args: Vec<u8>,
+		ray_id: Option<String>,
+		traceparent: Option<String>,
+		tracestate: Option<String>,
 		conn: ConnHandle,
 		reply: oneshot::Sender<Result<Vec<u8>>>,
 	},
@@ -889,9 +892,22 @@ impl ActorTask {
 			DispatchCommand::Action {
 				name,
 				args,
+				ray_id,
+				traceparent,
+				tracestate,
 				conn,
 				reply,
 			} => {
+				let telemetry = crate::telemetry::ActorInvocationTelemetry::start(
+					self.ctx.actor_id().to_owned(),
+					self.ctx.name().to_owned(),
+					format_actor_key(self.ctx.key()),
+					&name,
+					"action",
+					ray_id,
+					traceparent.as_deref(),
+					tracestate.as_deref(),
+				);
 				tracing::info!(
 					actor_id = %self.ctx.actor_id(),
 					action_name = %name,
@@ -908,7 +924,8 @@ impl ActorTask {
 						args,
 						conn: Some(conn),
 						scheduled_fire: None,
-						reply: Reply::from(tracked_reply_tx),
+						reply: Reply::from(tracked_reply_tx)
+							.with_invocation_telemetry(telemetry.clone()),
 					},
 				) {
 					Ok(()) => {
@@ -920,11 +937,22 @@ impl ActorTask {
 						self.log_dispatch_command_handled(command_kind, "enqueued");
 						let actor_id = self.ctx.actor_id().to_owned();
 						let ctx = self.ctx.clone();
+						let invocation_telemetry = telemetry.clone();
 						self.ctx.spawn_work(ActorWorkKind::Action, async move {
 							match tracked_reply_rx.await {
 								Ok(result) => {
 									let result =
 										result.map_err(|error| ctx.attach_actor_to_error(error));
+									if let Some(telemetry) = &invocation_telemetry {
+										let error_type = result.as_ref().err().map(|error| {
+											let structured = rivet_error::RivetError::extract(error);
+											format!("{}.{}", structured.group(), structured.code())
+										});
+										telemetry.finish(
+											if result.is_ok() { "OK" } else { "ERROR" },
+											error_type,
+										);
+									}
 									tracing::info!(
 										actor_id = %actor_id,
 										action_name = %action_name_for_log,
@@ -934,6 +962,12 @@ impl ActorTask {
 									let _ = reply.send(result);
 								}
 								Err(_) => {
+									if let Some(telemetry) = &invocation_telemetry {
+										telemetry.finish(
+											"ERROR",
+											Some("actor.dropped_reply".to_owned()),
+										);
+									}
 									tracing::warn!(
 										actor_id = %actor_id,
 										action_name = %action_name_for_log,

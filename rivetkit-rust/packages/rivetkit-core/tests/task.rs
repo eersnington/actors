@@ -9,6 +9,9 @@ pub(crate) mod moved_tests {
 	use std::time::{Duration, Instant};
 
 	use futures::{FutureExt, poll};
+	use opentelemetry::trace::{SpanId, TracerProvider as _};
+	use opentelemetry_sdk::error::OTelSdkResult;
+	use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
 	use rivet_envoy_client::config::{
 		BoxFuture as EnvoyBoxFuture, EnvoyCallbacks, EnvoyConfig, HttpRequest, HttpResponse,
 		WebSocketHandler, WebSocketSender,
@@ -27,9 +30,26 @@ pub(crate) mod moved_tests {
 	use tracing::field::{Field, Visit};
 	use tracing::instrument::WithSubscriber;
 	use tracing::{Event, Subscriber};
+	use tracing_subscriber::filter::filter_fn;
 	use tracing_subscriber::layer::{Context as LayerContext, Layer};
 	use tracing_subscriber::prelude::*;
 	use tracing_subscriber::registry::Registry;
+
+	#[derive(Clone, Debug, Default)]
+	struct TestSpanExporter(Arc<Mutex<Vec<SpanData>>>);
+
+	impl SpanExporter for TestSpanExporter {
+		fn export(
+			&mut self,
+			batch: Vec<SpanData>,
+		) -> futures::future::BoxFuture<'static, OTelSdkResult> {
+			self.0
+				.lock()
+				.expect("test span exporter lock poisoned")
+				.extend(batch);
+			Box::pin(async { Ok(()) })
+		}
+	}
 
 	use crate::actor::connection::{
 		ConnHandle, HibernatableConnectionMetadata, PersistedConnection,
@@ -49,7 +69,7 @@ pub(crate) mod moved_tests {
 	use crate::actor::task_types::ShutdownKind;
 	use crate::kv::tests::new_in_memory;
 	use crate::sqlite::{ColumnValue, SqliteDb};
-	use crate::types::ActorKey;
+	use crate::types::{ActorKey, ActorKeySegment};
 	use crate::{ActorConfig, ActorContext, ActorFactory};
 
 	fn test_hook_lock() -> &'static AsyncMutex<()> {
@@ -1903,6 +1923,9 @@ pub(crate) mod moved_tests {
 		task.handle_dispatch(DispatchCommand::Action {
 			name: "client-action".to_owned(),
 			args: Vec::new(),
+			ray_id: None,
+			traceparent: None,
+			tracestate: None,
 			conn: client_conn,
 			reply: reply_tx,
 		})
@@ -2006,6 +2029,9 @@ pub(crate) mod moved_tests {
 		task.handle_dispatch(DispatchCommand::Action {
 			name: "slow-action".to_owned(),
 			args: Vec::new(),
+			ray_id: None,
+			traceparent: None,
+			tracestate: None,
 			conn: client_conn,
 			reply: reply_tx,
 		})
@@ -3278,6 +3304,9 @@ pub(crate) mod moved_tests {
 			.send(DispatchCommand::Action {
 				name: "ping".to_owned(),
 				args: Vec::new(),
+				ray_id: None,
+				traceparent: None,
+				tracestate: None,
 				conn: ConnHandle::new("conn-grace", Vec::new(), Vec::new(), false),
 				reply: action_tx,
 			})
@@ -3322,6 +3351,9 @@ pub(crate) mod moved_tests {
 		task.handle_dispatch(DispatchCommand::Action {
 			name: "ping".to_owned(),
 			args: Vec::new(),
+			ray_id: None,
+			traceparent: None,
+			tracestate: None,
 			conn: ConnHandle::new("conn-finalize", Vec::new(), Vec::new(), false),
 			reply: reply_tx,
 		})
@@ -4009,7 +4041,7 @@ pub(crate) mod moved_tests {
 		let ctx = new_with_kv(
 			"actor-log-flow",
 			"task-log-flow",
-			Vec::new(),
+			vec![ActorKeySegment::String("steve".to_owned())],
 			"local",
 			new_in_memory(),
 		);
@@ -4017,12 +4049,19 @@ pub(crate) mod moved_tests {
 		let (dispatch_tx, dispatch_rx) = mpsc::unbounded_channel();
 		let (events_tx, events_rx) = mpsc::unbounded_channel();
 		ctx.configure_lifecycle_events(Some(events_tx));
-		let factory = Arc::new(ActorFactory::new(Default::default(), |start| {
+		let retained_telemetry = Arc::new(Mutex::new(None));
+		let retained_for_actor = retained_telemetry.clone();
+		let factory = Arc::new(ActorFactory::new(Default::default(), move |start| {
+			let retained_telemetry = retained_for_actor.clone();
 			Box::pin(async move {
 				let mut events = start.events;
 				while let Some(event) = events.recv().await {
 					match event {
 						ActorEvent::Action { reply, .. } => {
+							*retained_telemetry
+								.lock()
+								.expect("retained telemetry lock poisoned") =
+								reply.invocation_telemetry();
 							reply.send(Ok(vec![1]));
 						}
 						ActorEvent::RunGracefulCleanup { reply, .. } => {
@@ -4046,9 +4085,18 @@ pub(crate) mod moved_tests {
 			None,
 		);
 		let records = Arc::new(Mutex::new(Vec::new()));
-		let subscriber = Registry::default().with(ActorTaskLogLayer {
-			records: records.clone(),
-		});
+		let exporter = TestSpanExporter::default();
+		let provider = SdkTracerProvider::builder()
+			.with_simple_exporter(exporter.clone())
+			.build();
+		let otel_layer = tracing_opentelemetry::layer()
+			.with_tracer(provider.tracer("rivetkit-core-test"))
+			.with_filter(filter_fn(|metadata| metadata.target() == "rivetkit::telemetry"));
+		let subscriber = Registry::default()
+			.with(ActorTaskLogLayer {
+				records: records.clone(),
+			})
+			.with(otel_layer);
 		let dispatch = tracing::Dispatch::new(subscriber);
 		// `with_subscriber` deterministically captures logs polled inside
 		// `task.run()`. The user actor future and the action reply forwarder
@@ -4073,6 +4121,11 @@ pub(crate) mod moved_tests {
 			.send(DispatchCommand::Action {
 				name: "ping".to_owned(),
 				args: Vec::new(),
+				ray_id: Some("ray-log-flow".to_owned()),
+				traceparent: Some(
+					"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned(),
+				),
+				tracestate: None,
 				conn: ConnHandle::new("conn-log-flow", Vec::new(), Vec::new(), false),
 				reply: action_tx,
 			})
@@ -4083,6 +4136,71 @@ pub(crate) mod moved_tests {
 				.expect("dispatch reply should send")
 				.expect("dispatch should succeed"),
 			vec![1]
+		);
+		provider
+			.force_flush()
+			.expect("finished action span should export");
+		let spans = exporter
+			.0
+			.lock()
+			.expect("test span exporter lock poisoned");
+		let action_span = spans
+			.iter()
+			.find(|span| span.name == "task-log-flow.ping")
+			.expect("completed actor action span should be exported");
+		assert_eq!(
+			action_span.parent_span_id,
+			SpanId::from_hex("00f067aa0ba902b7").expect("valid parent span id")
+		);
+		assert!(action_span.attributes.iter().any(|attribute| {
+			attribute.key.as_str() == "rivet.ray.id"
+				&& attribute.value.as_str() == "ray-log-flow"
+		}));
+		assert!(action_span.attributes.iter().any(|attribute| {
+			attribute.key.as_str() == "rivet.actor.key"
+				&& attribute.value.as_str() == "steve"
+		}));
+		assert!(
+			retained_telemetry
+				.lock()
+				.expect("retained telemetry lock poisoned")
+				.is_some(),
+			"retaining the callback context must not keep the action span open"
+		);
+		drop(spans);
+
+		let (unsampled_tx, unsampled_rx) = oneshot::channel();
+		dispatch_tx
+			.send(DispatchCommand::Action {
+				name: "silent".to_owned(),
+				args: Vec::new(),
+				ray_id: Some("ray-unsampled".to_owned()),
+				traceparent: Some(
+					"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b8-00".to_owned(),
+				),
+				tracestate: None,
+				conn: ConnHandle::new("conn-unsampled", Vec::new(), Vec::new(), false),
+				reply: unsampled_tx,
+			})
+			.expect("unsampled dispatch command should send");
+		assert_eq!(
+			unsampled_rx
+				.await
+				.expect("unsampled dispatch reply should send")
+				.expect("sampling must not affect the action result"),
+			vec![1]
+		);
+		provider
+			.force_flush()
+			.expect("completed sampled spans should flush");
+		assert!(
+			!exporter
+				.0
+				.lock()
+				.expect("test span exporter lock poisoned")
+				.iter()
+				.any(|span| span.name == "task-log-flow.silent"),
+			"an unsampled remote parent must suppress the action span"
 		);
 
 		let (stop_tx, stop_rx) = oneshot::channel();

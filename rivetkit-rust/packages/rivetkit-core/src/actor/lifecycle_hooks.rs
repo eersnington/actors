@@ -7,9 +7,24 @@ use crate::actor::messages::ActorEvent;
 
 pub struct Reply<T> {
 	tx: Option<oneshot::Sender<Result<T>>>,
+	invocation_telemetry: Option<crate::telemetry::ActorInvocationTelemetry>,
 }
 
 impl<T> Reply<T> {
+	#[doc(hidden)]
+	pub fn with_invocation_telemetry(
+		mut self,
+		telemetry: Option<crate::telemetry::ActorInvocationTelemetry>,
+	) -> Self {
+		self.invocation_telemetry = telemetry;
+		self
+	}
+
+	#[doc(hidden)]
+	pub fn invocation_telemetry(&self) -> Option<crate::telemetry::ActorInvocationTelemetry> {
+		self.invocation_telemetry.clone()
+	}
+
 	pub fn send(mut self, result: Result<T>) {
 		if let Some(tx) = self.tx.take() {
 			let _ = tx.send(result);
@@ -35,7 +50,10 @@ impl<T> std::fmt::Debug for Reply<T> {
 
 impl<T> From<oneshot::Sender<Result<T>>> for Reply<T> {
 	fn from(tx: oneshot::Sender<Result<T>>) -> Self {
-		Self { tx: Some(tx) }
+		Self {
+			tx: Some(tx),
+			invocation_telemetry: None,
+		}
 	}
 }
 

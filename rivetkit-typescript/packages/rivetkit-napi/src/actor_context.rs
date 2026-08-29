@@ -18,8 +18,9 @@ use napi_derive::napi;
 use parking_lot::Mutex;
 use rivetkit_core::types::ActorKeySegment;
 use rivetkit_core::{
-	ActorContext as CoreActorContext, ActorWorkKind, ConnHandle as CoreConnHandle, KeepAwakeRegion,
-	Request as CoreRequest, RequestSaveOpts, StateDelta, WebSocketCallbackRegion, WorkflowKvWrite,
+	ActorContext as CoreActorContext, ActorInvocationTelemetry, ActorWorkKind,
+	ConnHandle as CoreConnHandle, KeepAwakeRegion, Request as CoreRequest, RequestSaveOpts, StateDelta,
+	WebSocketCallbackRegion, WorkflowKvWrite,
 };
 use scc::HashMap as SccHashMap;
 use tokio::sync::mpsc::UnboundedSender;
@@ -47,6 +48,7 @@ static ACTOR_CONTEXT_SHARED: LazyLock<SccHashMap<String, Weak<ActorContextShared
 #[napi]
 pub struct ActorContext {
 	inner: CoreActorContext,
+	invocation_telemetry: Option<ActorInvocationTelemetry>,
 	shared: Arc<ActorContextShared>,
 }
 
@@ -160,7 +162,20 @@ impl ActorContext {
 			shared_strong_count = Arc::strong_count(&shared),
 			"constructed napi class"
 		);
-		Self { inner, shared }
+		Self {
+			inner,
+			invocation_telemetry: None,
+			shared,
+		}
+	}
+
+	pub(crate) fn new_invocation(
+		inner: CoreActorContext,
+		invocation_telemetry: Option<ActorInvocationTelemetry>,
+	) -> Self {
+		let mut ctx = Self::new(inner);
+		ctx.invocation_telemetry = invocation_telemetry;
+		ctx
 	}
 
 	#[allow(dead_code)]
