@@ -502,7 +502,6 @@ function closeNativeSqlDatabase(
 	runtimeState.sql = undefined;
 	return database.close();
 }
-
 async function closeNativeDatabaseClient(
 	runtime: CoreRuntime,
 	ctx: ActorContextHandle,
@@ -4920,21 +4919,27 @@ export function buildNativeFactory(
 							conn != null
 								? makeConnCtx(ctx, conn, undefined, cancelToken)
 								: makeActorCtx(ctx, undefined, cancelToken);
-						try {
-							return encodeValue(
-								await handler(
-									actorCtx,
-									...validateActionArgs(
-										schemaConfig.actionInputSchemas,
-										name,
-										decodeArgs(args),
+						const runAction = async () => {
+							try {
+								return encodeValue(
+									await handler(
+										actorCtx,
+										...validateActionArgs(
+											schemaConfig.actionInputSchemas,
+											name,
+											decodeArgs(args),
+										),
+										...(scheduledFire ? [scheduledFire] : []),
 									),
-									...(scheduledFire ? [scheduledFire] : []),
-								),
-							);
-						} finally {
-							await actorCtx.dispose();
-						}
+								);
+							} finally {
+								await actorCtx.dispose();
+							}
+						};
+						return await runtime.runWithActorInvocationContext(
+							ctx,
+							runAction,
+						);
 					},
 				),
 			]),

@@ -1,3 +1,4 @@
+import type { AsyncLocalStorage } from "node:async_hooks";
 import type {
 	ActorContext as NativeActorContext,
 	NapiActorFactory as NativeActorFactory,
@@ -59,6 +60,10 @@ type NapiSqlBatchStatement = Parameters<
 type NapiSqlTransaction = Awaited<
 	ReturnType<NapiSqlDatabase["beginTransaction"]>
 >;
+export type NapiActorInvocationContext = {
+	readonly nativeCtx: NativeActorContext;
+	readonly runtimeState: object;
+};
 
 function asNativeRegistry(handle: RegistryHandle): NativeCoreRegistry {
 	return handle as unknown as NativeCoreRegistry;
@@ -219,13 +224,33 @@ export class NapiCoreRuntime implements CoreRuntime {
 
 	#bindings: NativeBindings;
 	#sql = new WeakMap<NativeActorContext, NapiSqlDatabase>();
+	#invocationContext: AsyncLocalStorage<NapiActorInvocationContext>;
 
-	constructor(bindings: NativeBindings) {
+	constructor(
+		bindings: NativeBindings,
+		invocationContext: AsyncLocalStorage<NapiActorInvocationContext>,
+	) {
 		this.#bindings = bindings;
+		this.#invocationContext = invocationContext;
+	}
+
+	#actorContextForOperation(owner: ActorContextHandle): NativeActorContext {
+		const ownerCtx = asNativeActorContext(owner);
+		const active = this.#invocationContext.getStore();
+		// Retained database and KV objects keep their owner context. Use the
+		// current action only when both contexts belong to the same actor generation.
+		if (active && active.runtimeState === ownerCtx.runtimeState()) {
+			return active.nativeCtx;
+		}
+		return ownerCtx;
+	}
+
+	#actorKvForOperation(ctx: ActorContextHandle) {
+		return this.#actorContextForOperation(ctx).kv();
 	}
 
 	#actorSql(ctx: ActorContextHandle): NapiSqlDatabase {
-		const nativeCtx = asNativeActorContext(ctx);
+		const nativeCtx = this.#actorContextForOperation(ctx);
 		let database = this.#sql.get(nativeCtx);
 		if (!database) {
 			database = nativeCtx.sql();
@@ -509,6 +534,16 @@ export class NapiCoreRuntime implements CoreRuntime {
 		return asNativeActorContext(ctx).actorId();
 	}
 
+	runWithActorInvocationContext<T>(ctx: ActorContextHandle, run: () => T): T {
+		const nativeCtx = asNativeActorContext(ctx);
+		return this.#invocationContext.run(
+			{
+				nativeCtx,
+				runtimeState: nativeCtx.runtimeState(),
+			},
+			run,
+		);
+	}
 	actorName(ctx: ActorContextHandle): string {
 		return asNativeActorContext(ctx).name();
 	}
@@ -615,7 +650,7 @@ export class NapiCoreRuntime implements CoreRuntime {
 		ctx: ActorContextHandle,
 		key: RuntimeBytes,
 	): Promise<RuntimeBytes | null> {
-		return await asNativeActorContext(ctx).kv().get(toNapiBuffer(key));
+		return await this.#actorKvForOperation(ctx).get(toNapiBuffer(key));
 	}
 
 	async actorKvPut(
@@ -623,16 +658,17 @@ export class NapiCoreRuntime implements CoreRuntime {
 		key: RuntimeBytes,
 		value: RuntimeBytes,
 	): Promise<void> {
-		await asNativeActorContext(ctx)
-			.kv()
-			.put(toNapiBuffer(key), toNapiBuffer(value));
+		await this.#actorKvForOperation(ctx).put(
+			toNapiBuffer(key),
+			toNapiBuffer(value),
+		);
 	}
 
 	async actorKvDelete(
 		ctx: ActorContextHandle,
 		key: RuntimeBytes,
 	): Promise<void> {
-		await asNativeActorContext(ctx).kv().delete(toNapiBuffer(key));
+		await this.#actorKvForOperation(ctx).delete(toNapiBuffer(key));
 	}
 
 	async actorKvDeleteRange(
@@ -640,9 +676,10 @@ export class NapiCoreRuntime implements CoreRuntime {
 		start: RuntimeBytes,
 		end: RuntimeBytes,
 	): Promise<void> {
-		await asNativeActorContext(ctx)
-			.kv()
-			.deleteRange(toNapiBuffer(start), toNapiBuffer(end));
+		await this.#actorKvForOperation(ctx).deleteRange(
+			toNapiBuffer(start),
+			toNapiBuffer(end),
+		);
 	}
 
 	async actorKvListPrefix(
@@ -650,9 +687,10 @@ export class NapiCoreRuntime implements CoreRuntime {
 		prefix: RuntimeBytes,
 		options?: RuntimeKvListOptions | undefined | null,
 	): Promise<RuntimeKvEntry[]> {
-		return await asNativeActorContext(ctx)
-			.kv()
-			.listPrefix(toNapiBuffer(prefix), options);
+		return await this.#actorKvForOperation(ctx).listPrefix(
+			toNapiBuffer(prefix),
+			options,
+		);
 	}
 
 	async actorKvListRange(
@@ -661,36 +699,38 @@ export class NapiCoreRuntime implements CoreRuntime {
 		end: RuntimeBytes,
 		options?: RuntimeKvListOptions | undefined | null,
 	): Promise<RuntimeKvEntry[]> {
-		return await asNativeActorContext(ctx)
-			.kv()
-			.listRange(toNapiBuffer(start), toNapiBuffer(end), options);
+		return await this.#actorKvForOperation(ctx).listRange(
+			toNapiBuffer(start),
+			toNapiBuffer(end),
+			options,
+		);
 	}
 
 	async actorKvBatchGet(
 		ctx: ActorContextHandle,
 		keys: RuntimeBytes[],
 	): Promise<Array<RuntimeBytes | undefined | null>> {
-		return await asNativeActorContext(ctx)
-			.kv()
-			.batchGet(keys.map(toNapiBuffer));
+		return await this.#actorKvForOperation(ctx).batchGet(
+			keys.map(toNapiBuffer),
+		);
 	}
 
 	async actorKvBatchPut(
 		ctx: ActorContextHandle,
 		entries: RuntimeKvEntry[],
 	): Promise<void> {
-		await asNativeActorContext(ctx)
-			.kv()
-			.batchPut(entries.map(toNapiKvEntry));
+		await this.#actorKvForOperation(ctx).batchPut(
+			entries.map(toNapiKvEntry),
+		);
 	}
 
 	async actorKvBatchDelete(
 		ctx: ActorContextHandle,
 		keys: RuntimeBytes[],
 	): Promise<void> {
-		await asNativeActorContext(ctx)
-			.kv()
-			.batchDelete(keys.map(toNapiBuffer));
+		await this.#actorKvForOperation(ctx).batchDelete(
+			keys.map(toNapiBuffer),
+		);
 	}
 
 	async actorSqlExec(
@@ -1078,9 +1118,15 @@ export async function loadNapiRuntime(): Promise<{
 	// would snapshot the native `.node` addon into the deploy and 413. The
 	// computed specifier keeps it opaque to static analysis so it is never
 	// bundled. Enforced by scripts/ci/check-edge-native-closure.mjs.
-	const bindings = await import(["@rivetkit", "rivetkit-napi"].join("/"));
+	const [{ AsyncLocalStorage }, bindings] = await Promise.all([
+		import("node:async_hooks"),
+		import(["@rivetkit", "rivetkit-napi"].join("/")),
+	]);
 	return {
 		bindings,
-		runtime: new NapiCoreRuntime(bindings),
+		runtime: new NapiCoreRuntime(
+			bindings,
+			new AsyncLocalStorage<NapiActorInvocationContext>(),
+		),
 	};
 }

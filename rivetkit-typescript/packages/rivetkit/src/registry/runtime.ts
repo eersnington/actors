@@ -514,6 +514,10 @@ export interface CoreRuntime {
 		writes: RuntimeWorkflowKvWrite[],
 	): Promise<void>;
 	actorId(ctx: ActorContextHandle): string;
+	runWithActorInvocationContext<T>(
+		ctx: ActorContextHandle,
+		run: () => T,
+	): T;
 	actorName(ctx: ActorContextHandle): string;
 	actorKey(ctx: ActorContextHandle): RuntimeActorKeySegment[];
 	actorRegion(ctx: ActorContextHandle): string;

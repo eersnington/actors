@@ -282,13 +282,21 @@ impl ActorContext {
 	// TypeScript compatibility while steering new code to SQLite or actor state.
 	#[allow(deprecated)]
 	pub fn kv(&self) -> Kv {
-		Kv::new(self.inner.clone())
+		Kv::new(
+			self.inner
+				.kv()
+				.clone()
+				.with_invocation_telemetry(self.invocation_telemetry.clone()),
+		)
 	}
 
 	#[napi]
 	pub fn sql(&self) -> JsNativeDatabase {
 		JsNativeDatabase::new(
-			self.inner.sql().clone(),
+			self.inner
+				.sql()
+				.clone()
+				.with_invocation_telemetry(self.invocation_telemetry.clone()),
 			Some(self.inner.actor_id().to_owned()),
 		)
 	}
