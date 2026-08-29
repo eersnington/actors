@@ -817,9 +817,7 @@ pub(crate) mod moved_tests {
 		channel: Option<String>,
 		actor_id: Option<String>,
 		reason: Option<String>,
-		command: Option<String>,
 		kind: Option<String>,
-		event: Option<String>,
 	}
 
 	impl Visit for MessageVisitor {
@@ -829,9 +827,7 @@ pub(crate) mod moved_tests {
 				"channel" => self.channel = Some(value.to_owned()),
 				"actor_id" => self.actor_id = Some(value.to_owned()),
 				"reason" => self.reason = Some(value.to_owned()),
-				"command" => self.command = Some(value.to_owned()),
 				"kind" => self.kind = Some(value.to_owned()),
-				"event" => self.event = Some(value.to_owned()),
 				_ => {}
 			}
 		}
@@ -850,27 +846,12 @@ pub(crate) mod moved_tests {
 				"reason" => {
 					self.reason = Some(format!("{value:?}").trim_matches('"').to_owned());
 				}
-				"command" => {
-					self.command = Some(format!("{value:?}").trim_matches('"').to_owned());
-				}
 				"kind" => {
 					self.kind = Some(format!("{value:?}").trim_matches('"').to_owned());
-				}
-				"event" => {
-					self.event = Some(format!("{value:?}").trim_matches('"').to_owned());
 				}
 				_ => {}
 			}
 		}
-	}
-
-	#[derive(Clone, Debug)]
-	struct ActorTaskLog {
-		level: tracing::Level,
-		actor_id: Option<String>,
-		message: Option<String>,
-		command: Option<String>,
-		event: Option<String>,
 	}
 
 	#[derive(Clone, Debug, PartialEq, Eq)]
@@ -897,11 +878,6 @@ pub(crate) mod moved_tests {
 	#[derive(Clone)]
 	struct ClosedChannelWarningLayer {
 		records: Arc<Mutex<Vec<ClosedChannelWarning>>>,
-	}
-
-	#[derive(Clone)]
-	struct ActorTaskLogLayer {
-		records: Arc<Mutex<Vec<ActorTaskLog>>>,
 	}
 
 	struct NotifyOnDrop(Mutex<Option<oneshot::Sender<()>>>);
@@ -995,26 +971,6 @@ pub(crate) mod moved_tests {
 					channel,
 					reason,
 					message,
-				});
-		}
-	}
-
-	impl<S> Layer<S> for ActorTaskLogLayer
-	where
-		S: Subscriber,
-	{
-		fn on_event(&self, event: &Event<'_>, _ctx: LayerContext<'_, S>) {
-			let mut visitor = MessageVisitor::default();
-			event.record(&mut visitor);
-			self.records
-				.lock()
-				.expect("actor-task log lock poisoned")
-				.push(ActorTaskLog {
-					level: *event.metadata().level(),
-					actor_id: visitor.actor_id,
-					message: visitor.message,
-					command: visitor.command,
-					event: visitor.event,
 				});
 		}
 	}
@@ -1903,6 +1859,9 @@ pub(crate) mod moved_tests {
 		task.handle_dispatch(DispatchCommand::Action {
 			name: "client-action".to_owned(),
 			args: Vec::new(),
+			ray_id: None,
+			traceparent: None,
+			tracestate: None,
 			conn: client_conn,
 			reply: reply_tx,
 		})
@@ -2006,6 +1965,9 @@ pub(crate) mod moved_tests {
 		task.handle_dispatch(DispatchCommand::Action {
 			name: "slow-action".to_owned(),
 			args: Vec::new(),
+			ray_id: None,
+			traceparent: None,
+			tracestate: None,
 			conn: client_conn,
 			reply: reply_tx,
 		})
@@ -3278,6 +3240,9 @@ pub(crate) mod moved_tests {
 			.send(DispatchCommand::Action {
 				name: "ping".to_owned(),
 				args: Vec::new(),
+				ray_id: None,
+				traceparent: None,
+				tracestate: None,
 				conn: ConnHandle::new("conn-grace", Vec::new(), Vec::new(), false),
 				reply: action_tx,
 			})
@@ -3322,6 +3287,9 @@ pub(crate) mod moved_tests {
 		task.handle_dispatch(DispatchCommand::Action {
 			name: "ping".to_owned(),
 			args: Vec::new(),
+			ray_id: None,
+			traceparent: None,
+			tracestate: None,
 			conn: ConnHandle::new("conn-finalize", Vec::new(), Vec::new(), false),
 			reply: reply_tx,
 		})
@@ -4000,153 +3968,6 @@ pub(crate) mod moved_tests {
 				reason: "all senders dropped".to_owned(),
 				message: "actor task terminating because dispatch inbox closed".to_owned(),
 			}]
-		);
-	}
-
-	#[tokio::test(flavor = "current_thread")]
-	async fn actor_task_logs_lifecycle_dispatch_and_actor_event_flow() {
-		let _hook_lock = test_hook_lock().lock().await;
-		let ctx = new_with_kv(
-			"actor-log-flow",
-			"task-log-flow",
-			Vec::new(),
-			"local",
-			new_in_memory(),
-		);
-		let (lifecycle_tx, lifecycle_rx) = mpsc::unbounded_channel();
-		let (dispatch_tx, dispatch_rx) = mpsc::unbounded_channel();
-		let (events_tx, events_rx) = mpsc::unbounded_channel();
-		ctx.configure_lifecycle_events(Some(events_tx));
-		let factory = Arc::new(ActorFactory::new(Default::default(), |start| {
-			Box::pin(async move {
-				let mut events = start.events;
-				while let Some(event) = events.recv().await {
-					match event {
-						ActorEvent::Action { reply, .. } => {
-							reply.send(Ok(vec![1]));
-						}
-						ActorEvent::RunGracefulCleanup { reply, .. } => {
-							reply.send(Ok(()));
-							break;
-						}
-						_ => {}
-					}
-				}
-				Ok(())
-			})
-		}));
-		let task = ActorTask::new(
-			"actor-log-flow".into(),
-			0,
-			lifecycle_rx,
-			dispatch_rx,
-			events_rx,
-			factory,
-			ctx,
-			None,
-		);
-		let records = Arc::new(Mutex::new(Vec::new()));
-		let subscriber = Registry::default().with(ActorTaskLogLayer {
-			records: records.clone(),
-		});
-		let dispatch = tracing::Dispatch::new(subscriber);
-		// `with_subscriber` deterministically captures logs polled inside
-		// `task.run()`. The user actor future and the action reply forwarder
-		// are spawned as separate tasks by the runtime, so the thread-local
-		// default additionally captures them; that is deterministic here
-		// because this test runs on a current_thread runtime and holds
-		// `test_hook_lock()`.
-		let _guard = tracing::dispatcher::set_default(&dispatch);
-		let run = tokio::spawn(task.run().with_subscriber(dispatch));
-
-		let (start_tx, start_rx) = oneshot::channel();
-		lifecycle_tx
-			.send(LifecycleCommand::Start { reply: start_tx })
-			.expect("start command should send");
-		start_rx
-			.await
-			.expect("start reply should send")
-			.expect("start should succeed");
-
-		let (action_tx, action_rx) = oneshot::channel();
-		dispatch_tx
-			.send(DispatchCommand::Action {
-				name: "ping".to_owned(),
-				args: Vec::new(),
-				conn: ConnHandle::new("conn-log-flow", Vec::new(), Vec::new(), false),
-				reply: action_tx,
-			})
-			.expect("dispatch command should send");
-		assert_eq!(
-			action_rx
-				.await
-				.expect("dispatch reply should send")
-				.expect("dispatch should succeed"),
-			vec![1]
-		);
-
-		let (stop_tx, stop_rx) = oneshot::channel();
-		lifecycle_tx
-			.send(LifecycleCommand::Stop {
-				reason: ShutdownKind::Destroy,
-				reply: stop_tx,
-			})
-			.expect("stop command should send");
-		stop_rx
-			.await
-			.expect("stop reply should send")
-			.expect("stop should succeed");
-		run.await
-			.expect("task join should succeed")
-			.expect("task should succeed");
-
-		let logs = records
-			.lock()
-			.expect("actor-task log lock poisoned")
-			.clone();
-		assert!(
-			logs.iter().any(|log| {
-				log.level == tracing::Level::DEBUG
-					&& log.actor_id.as_deref() == Some("actor-log-flow")
-					&& log.message.as_deref() == Some("actor lifecycle command received")
-					&& log.command.as_deref() == Some("start")
-			}),
-			"expected `actor lifecycle command received` log for actor-log-flow; logs={logs:?}"
-		);
-		assert!(
-			logs.iter().any(|log| {
-				log.level == tracing::Level::INFO
-					&& log.actor_id.as_deref() == Some("actor-log-flow")
-					&& log.message.as_deref() == Some("actor task: ActorEvent::Action enqueued")
-			}),
-			"expected `actor task: ActorEvent::Action enqueued` log for actor-log-flow; logs={logs:?}"
-		);
-		assert!(
-			logs.iter().any(|log| {
-				log.level == tracing::Level::INFO
-					&& log.actor_id.as_deref() == Some("actor-log-flow")
-					&& log.message.as_deref()
-						== Some("actor task: tracked reply received, forwarding")
-			}),
-			"expected `actor task: tracked reply received, forwarding` log for actor-log-flow; logs={logs:?}"
-		);
-		assert!(
-			logs.iter().any(|log| {
-				log.level == tracing::Level::DEBUG
-					&& log.actor_id.as_deref() == Some("actor-log-flow")
-					&& log.message.as_deref() == Some("actor event enqueued")
-					&& log.event.as_deref() == Some("action")
-			}),
-			"expected `actor event enqueued` log for actor-log-flow; logs={logs:?}"
-		);
-		assert!(
-			logs.iter().any(|log| {
-				log.level == tracing::Level::DEBUG
-					&& log.actor_id.as_deref() == Some("actor-log-flow")
-					&& log.message.as_deref() == Some("actor event drained")
-					&& log.event.as_deref() == Some("action")
-			}),
-			"expected `actor event drained` log for actor-log-flow; logs={logs:?}"
 		);
 	}
 

@@ -190,6 +190,7 @@ pub(crate) struct ConnectionPayload {
 #[derive(Clone)]
 pub(crate) struct ActionPayload {
 	pub(crate) ctx: CoreActorContext,
+	pub(crate) telemetry: Option<rivetkit_core::ActorInvocationTelemetry>,
 	pub(crate) conn: Option<CoreConnHandle>,
 	pub(crate) name: String,
 	pub(crate) args: Vec<u8>,
@@ -903,7 +904,10 @@ fn build_connection_payload(
 
 fn build_action_payload(env: &Env, payload: ActionPayload) -> napi::Result<Vec<napi::JsUnknown>> {
 	let mut object = env.create_object()?;
-	object.set("ctx", ActorContext::new(payload.ctx))?;
+	object.set(
+		"ctx",
+		ActorContext::new_invocation(payload.ctx, payload.telemetry),
+	)?;
 	match payload.conn {
 		Some(conn) => object.set("conn", ConnHandle::new(conn))?,
 		None => object.set("conn", env.get_null()?)?,

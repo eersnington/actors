@@ -1611,6 +1611,16 @@ impl ActorContext {
 			let started_at = Instant::now();
 			let action_name = action.clone();
 			let (reply_tx, reply_rx) = oneshot::channel();
+			let telemetry = crate::telemetry::ActorInvocationTelemetry::start(
+				ctx.actor_id().to_owned(),
+				ctx.name().to_owned(),
+				format_actor_key(ctx.key()),
+				&action_name,
+				"scheduled",
+				None,
+				None,
+				None,
+			);
 
 			let mut dispatch_error = None;
 			match ctx.try_send_actor_event(
@@ -1619,7 +1629,7 @@ impl ActorContext {
 					args,
 					conn: None,
 					scheduled_fire: Some(scheduled_fire),
-					reply: Reply::from(reply_tx),
+					reply: Reply::from(reply_tx).with_invocation_telemetry(telemetry.clone()),
 				},
 				"scheduled_action",
 			) {
@@ -1653,6 +1663,16 @@ impl ActorContext {
 						"failed to enqueue scheduled event"
 					);
 				}
+			}
+			if let Some(telemetry) = telemetry {
+				let error_type = dispatch_error.as_ref().map(|error| {
+					let structured = rivet_error::RivetError::extract(error);
+					format!("{}.{}", structured.group(), structured.code())
+				});
+				telemetry.finish(
+					if dispatch_error.is_some() { "ERROR" } else { "OK" },
+					error_type,
+				);
 			}
 
 			ctx.finish_schedule_dispatch(&event_id, history_id, dispatch_error.as_ref())
