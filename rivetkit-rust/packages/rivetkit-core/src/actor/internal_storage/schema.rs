@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail};
 use super::queries::{LOAD_META_TEXT_SQL, UPSERT_META_TEXT_SQL};
 use crate::sqlite::{BindParam, ColumnValue, SqliteBatchStatement, SqliteDb};
 
-pub(crate) const INTERNAL_SCHEMA_VERSION: i64 = 1;
+pub(crate) const INTERNAL_SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA_VERSION_KEY: &str = "schema_version";
 
@@ -51,7 +51,7 @@ CREATE TABLE _rivet_actor_state (
     state BLOB NOT NULL
 ) STRICT
 "#,
-	// W[per schedule/cancel/fire, immediate | point insert/delete | <200 B | replaces full actor blob rewrite with one row]
+	// W[per schedule/cancel/fire, immediate | point insert/delete | <1 KiB | replaces full actor blob rewrite with one row]
 	r#"
 CREATE TABLE _rivet_schedule_events (
     event_id         TEXT PRIMARY KEY,
@@ -149,6 +149,10 @@ CREATE TABLE _rivet_user_kv (
     value BLOB NOT NULL
 ) STRICT, WITHOUT ROWID
 "#,
+], &[
+	"ALTER TABLE _rivet_schedule_events ADD COLUMN ray_id TEXT",
+	"ALTER TABLE _rivet_schedule_events ADD COLUMN traceparent TEXT",
+	"ALTER TABLE _rivet_schedule_events ADD COLUMN tracestate TEXT",
 ]];
 
 pub(crate) async fn ensure_internal_schema(db: &SqliteDb) -> Result<()> {

@@ -282,7 +282,26 @@ type ExportedSpan = {
 	traceId: string;
 	spanId: string;
 	parentSpanId: string;
+	name: string;
+	attributes: Map<string, string>;
+	links: Array<{ traceId: string; spanId: string }>;
 };
+
+function decodeStringAttributes(
+	fields: Map<number, Uint8Array[]>,
+): Map<string, string> {
+	return new Map(
+		(fields.get(9) ?? []).flatMap((encoded) => {
+			const attribute = protobufFields(encoded);
+			const key = Buffer.from(attribute.get(1)?.[0] ?? []).toString();
+			const value = protobufFields(attribute.get(2)?.[0] ?? new Uint8Array());
+			const stringValue = value.get(1)?.[0];
+			return key && stringValue
+				? ([[key, Buffer.from(stringValue).toString()]] as const)
+				: [];
+		}),
+	);
+}
 
 function protobufFields(message: Uint8Array): Map<number, Uint8Array[]> {
 	const fields = new Map<number, Uint8Array[]>();
@@ -336,6 +355,15 @@ function decodeExportedSpans(bodies: Buffer[]): ExportedSpan[] {
 						parentSpanId: Buffer.from(fields.get(4)?.[0] ?? []).toString(
 							"hex",
 						),
+						name: Buffer.from(fields.get(5)?.[0] ?? []).toString(),
+						attributes: decodeStringAttributes(fields),
+						links: (fields.get(13) ?? []).map((encoded) => {
+							const link = protobufFields(encoded);
+							return {
+								traceId: Buffer.from(link.get(1)?.[0] ?? []).toString("hex"),
+								spanId: Buffer.from(link.get(2)?.[0] ?? []).toString("hex"),
+							};
+						}),
 					});
 				}
 			}
@@ -587,6 +615,16 @@ describe.sequential("native NAPI runtime integration", () => {
 		expect(await Promise.all(tokens.map((token) => handle.relay(token)))).toEqual(
 			tokens,
 		);
+		const scheduledToken = crypto.randomUUID();
+		expect(await handle.scheduleOnce(scheduledToken)).toBe(scheduledToken);
+		const scheduledDeadline = Date.now() + 10_000;
+		let completedScheduledToken = "";
+		while (Date.now() < scheduledDeadline) {
+			completedScheduledToken = await handle.getScheduledToken();
+			if (completedScheduledToken === scheduledToken) break;
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		expect(completedScheduledToken).toBe(scheduledToken);
 		await waitFor(
 			() =>
 				tokens.every(
@@ -632,11 +670,30 @@ describe.sequential("native NAPI runtime integration", () => {
 		for (const context of contexts) {
 			expect(
 				spans.find((span) => span.spanId === context.targetSpanId),
-			).toEqual({
+			).toMatchObject({
 				traceId: context.traceId,
 				spanId: context.targetSpanId,
 				parentSpanId: context.sourceSpanId,
 			});
 		}
+		const scheduleOrigin = spans.find(
+			(span) => span.name === "correlationSource.scheduleOnce",
+		);
+		const scheduledInvocation = spans.find(
+			(span) => span.name === "correlationSource.completeScheduled",
+		);
+		expect(scheduleOrigin).toBeDefined();
+		expect(scheduledInvocation).toBeDefined();
+		expect(scheduledInvocation?.traceId).not.toBe(scheduleOrigin?.traceId);
+		expect(scheduledInvocation?.attributes.get("rivet.ray.id")).toBe(
+			scheduleOrigin?.attributes.get("rivet.ray.id"),
+		);
+		expect(scheduledInvocation?.attributes.get("rivet.invocation.type")).toBe(
+			"scheduled",
+		);
+		expect(scheduledInvocation?.links).toContainEqual({
+			traceId: scheduleOrigin?.traceId,
+			spanId: scheduleOrigin?.spanId,
+		});
 	}, 120_000);
 });

@@ -1158,6 +1158,37 @@ mod moved_tests {
 	}
 
 	#[tokio::test]
+	async fn scheduled_action_preserves_its_originating_trace_context() {
+		let ctx = super::new_with_kv(
+			"actor-durable-trace",
+			"actor",
+			Vec::new(),
+			"local",
+			crate::kv::Kv::new_in_memory(),
+		);
+		let trace_context = crate::telemetry::DurableTraceContext {
+			ray_id: "ray-durable".to_owned(),
+			traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned(),
+			tracestate: Some("vendor=value".to_owned()),
+		};
+		ctx.at_with_trace_context(
+			now_timestamp_ms() - 1,
+			"resume",
+			&[],
+			Some(trace_context.clone()),
+		)
+		.await
+		.unwrap();
+
+		let dispatches = ctx.take_due_schedule_dispatches().await.unwrap();
+		assert_eq!(dispatches.len(), 1);
+		let persisted = dispatches[0].trace_context.as_ref().unwrap();
+		assert_eq!(persisted.ray_id, trace_context.ray_id);
+		assert_eq!(persisted.traceparent, trace_context.traceparent);
+		assert_eq!(persisted.tracestate, trace_context.tracestate);
+	}
+
+	#[tokio::test]
 	async fn keep_awake_region_blocks_sleep_idle_until_guard_drops() {
 		let ctx = super::new_with_kv(
 			"actor-keep-awake",
