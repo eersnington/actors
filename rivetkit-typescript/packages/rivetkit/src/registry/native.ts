@@ -76,6 +76,7 @@ import {
 } from "@/utils/node";
 import { logger } from "./log";
 import { loadNapiRuntime } from "./napi-runtime";
+import { runWithActorInvocationTrace } from "./otel-context";
 import {
 	type NativeValidationConfig,
 	validateActionArgs,
@@ -4935,25 +4936,33 @@ export function buildNativeFactory(
 					) => {
 						const { ctx, conn, args, scheduledFire, cancelToken } =
 							unwrapTsfnPayload(error, payload);
+						const invocationTraceContext = callNativeSync(() =>
+							runtime.actorInvocationTraceContext?.(ctx),
+						);
 						const actorCtx =
 							conn != null
 								? makeConnCtx(ctx, conn, undefined, cancelToken)
 								: makeActorCtx(ctx, undefined, cancelToken);
-						try {
-							return encodeValue(
-								await handler(
-									actorCtx,
-									...validateActionArgs(
-										schemaConfig.actionInputSchemas,
-										name,
-										decodeArgs(args),
-									),
-									...(scheduledFire ? [scheduledFire] : []),
-								),
-							);
-						} finally {
-							await actorCtx.dispose();
-						}
+						return await runWithActorInvocationTrace(
+							invocationTraceContext,
+							async () => {
+								try {
+									return encodeValue(
+										await handler(
+											actorCtx,
+											...validateActionArgs(
+												schemaConfig.actionInputSchemas,
+												name,
+												decodeArgs(args),
+											),
+											...(scheduledFire ? [scheduledFire] : []),
+										),
+									);
+								} finally {
+									await actorCtx.dispose();
+								}
+							},
+						);
 					},
 				),
 			]),

@@ -588,6 +588,10 @@ describe.sequential("native NAPI runtime integration", () => {
 
 		const otlpBodies: Buffer[] = [];
 		collector = createServer((request, response) => {
+			if (request.url === "/trace-context") {
+				response.writeHead(200).end(request.headers.traceparent ?? "");
+				return;
+			}
 			const chunks: Buffer[] = [];
 			request.on("data", (chunk: Buffer) => chunks.push(chunk));
 			request.on("end", () => {
@@ -612,6 +616,8 @@ describe.sequential("native NAPI runtime integration", () => {
 				OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `http://127.0.0.1:${collectorPort}/v1/traces`,
 				OTEL_SERVICE_NAME: "rivetkit-actor-call-integration",
 				OTEL_TRACES_SAMPLER: "always_on",
+				RIVETKIT_TEST_JS_OTEL: "1",
+				RIVETKIT_TEST_TRACE_ECHO_URL: `http://127.0.0.1:${collectorPort}/trace-context`,
 			},
 			stdio: ["ignore", "pipe", "pipe"],
 		});
@@ -647,6 +653,36 @@ describe.sequential("native NAPI runtime integration", () => {
 		expect(await Promise.all(tokens.map((token) => handle.relay(token)))).toEqual(
 			tokens,
 		);
+		const fetchTokens = [crypto.randomUUID(), crypto.randomUUID()];
+		const fetchTraceparents = await Promise.all(
+			fetchTokens.map((token) => handle.fetchTraceparent(token)),
+		);
+		await waitFor(
+			() =>
+				fetchTokens.every((token) =>
+					runtimeLogs.stdout.includes(`correlation_token=${token}`),
+				),
+			10_000,
+			`timed out waiting for fetch logs:\n${runtimeLogs.stdout}`,
+		);
+		const fetchContexts = fetchTokens.map((token, index) => {
+			const line = runtimeLogs.stdout
+				.split("\n")
+				.find(
+					(candidate) =>
+						candidate.includes(`correlation_token=${token}`) &&
+						logField(candidate, "correlation_role") === "fetch",
+				)!;
+			const actionTraceId = logField(line, "trace_id")!;
+			const actionSpanId = logField(line, "span_id")!;
+			const traceparent = fetchTraceparents[index] as string;
+			const [, childTraceId, childSpanId] = traceparent.split("-");
+			expect(childTraceId).toBe(actionTraceId);
+			expect(childSpanId).not.toBe(actionSpanId);
+			return { traceId: childTraceId, spanId: childSpanId };
+		});
+		expect(fetchContexts[0]?.traceId).not.toBe(fetchContexts[1]?.traceId);
+		expect(fetchContexts[0]?.spanId).not.toBe(fetchContexts[1]?.spanId);
 		const scheduledToken = crypto.randomUUID();
 		expect(await handle.scheduleOnce(scheduledToken)).toBe(scheduledToken);
 		const scheduledDeadline = Date.now() + 10_000;

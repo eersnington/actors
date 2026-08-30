@@ -7,6 +7,23 @@ import { db } from "../../src/db/mod";
 import { actor, event, queue, setup, UserError } from "../../src/mod";
 import { buildNativeRegistry } from "../../src/registry/native";
 
+if (process.env.RIVETKIT_TEST_JS_OTEL === "1") {
+	const [{ registerInstrumentations }, { UndiciInstrumentation }, { NodeTracerProvider }] =
+		await Promise.all([
+			import("@opentelemetry/instrumentation"),
+			import("@opentelemetry/instrumentation-undici"),
+			import("@opentelemetry/sdk-trace-node"),
+		]);
+	new NodeTracerProvider().register();
+	registerInstrumentations({
+		instrumentations: [
+			new UndiciInstrumentation({
+				ignoreRequestHook: (request) => request.path !== "/trace-context",
+			}),
+		],
+	});
+}
+
 const textDecoder = new TextDecoder();
 const fixtureDir = dirname(fileURLToPath(import.meta.url));
 const repoEngineBinary = resolve(
@@ -59,6 +76,16 @@ const correlationSource = actor({
 		);
 	},
 	actions: {
+		fetchTraceparent: async (c, token: string) => {
+			c.log.info({
+				msg: "making instrumented outbound request",
+				correlation_role: "fetch",
+				correlation_token: token,
+			});
+			const endpoint = process.env.RIVETKIT_TEST_TRACE_ECHO_URL;
+			if (!endpoint) throw new Error("missing trace echo URL");
+			return await (await fetch(endpoint)).text();
+		},
 		scheduleOnce: async (c, token: string) => {
 			await c.schedule.after(100, "completeScheduled", token);
 			return token;
