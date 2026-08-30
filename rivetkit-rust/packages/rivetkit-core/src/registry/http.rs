@@ -9,6 +9,7 @@ const HEADER_RIVET_ACTOR: &str = "x-rivet-actor";
 const HEADER_RIVET_ACTOR_GENERATION: &str = "x-rivet-actor-generation";
 const HEADER_RIVET_ACTOR_KEY: &str = "x-rivet-actor-key";
 const HEADER_RIVET_RAY_ID: &str = "x-rivet-ray-id";
+const HEADER_RIVETKIT_RAY_ID: &str = "x-rivetkit-ray-id";
 const HEADER_TRACEPARENT: &str = "traceparent";
 const HEADER_TRACESTATE: &str = "tracestate";
 
@@ -208,11 +209,7 @@ impl RegistryDispatcher {
 				conn.clone(),
 				action_name.clone(),
 				args,
-				request
-					.headers()
-					.get(HEADER_RIVET_RAY_ID)
-					.and_then(|value| value.to_str().ok())
-					.map(str::to_owned),
+				Self::invocation_ray_id(request.headers()),
 				request
 					.headers()
 					.get(HEADER_TRACEPARENT)
@@ -263,6 +260,22 @@ impl RegistryDispatcher {
 				framework_action_error_response(encoding, error, Some(&actor))
 			}
 		}
+	}
+
+	fn invocation_ray_id(headers: &http::HeaderMap) -> Option<String> {
+		// RivetKit rays are caller-propagated trace correlation only. The engine-owned
+		// x-rivet-ray-id remains the trusted request identity and fallback at ingress.
+		[HEADER_RIVETKIT_RAY_ID, HEADER_RIVET_RAY_ID]
+			.into_iter()
+			.filter_map(|name| headers.get(name)?.to_str().ok())
+			.find(|value| {
+				!value.is_empty()
+					&& value.len() <= 128
+					&& value
+						.bytes()
+						.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+			})
+			.map(str::to_owned)
 	}
 
 	async fn handle_queue_fetch(

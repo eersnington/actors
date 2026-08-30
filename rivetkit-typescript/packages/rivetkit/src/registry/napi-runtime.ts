@@ -544,6 +544,22 @@ export class NapiCoreRuntime implements CoreRuntime {
 			run,
 		);
 	}
+
+	actorInvocationTraceContext(ctx: ActorContextHandle) {
+		const context = asNativeActorContext(ctx).invocationTraceContext();
+		if (!context) return undefined;
+		return {
+			rayId: context.rayId,
+			span: {
+				traceId: context.traceId,
+				spanId: context.spanId,
+				traceparent: context.traceparent,
+				...(context.tracestate
+					? { tracestate: context.tracestate }
+					: {}),
+			},
+		};
+	}
 	actorName(ctx: ActorContextHandle): string {
 		return asNativeActorContext(ctx).name();
 	}

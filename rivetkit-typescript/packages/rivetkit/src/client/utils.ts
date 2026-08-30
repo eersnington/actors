@@ -76,7 +76,7 @@ export interface HttpRequestOpts<
 > {
 	method: string;
 	url: string;
-	headers: Record<string, string>;
+	headers: ConstructorParameters<typeof Headers>[0];
 	body?: Request;
 	encoding: Encoding;
 	skipParseResponse?: boolean;
@@ -139,19 +139,14 @@ export async function sendHttpRequest<
 	// Send request
 	let response: globalThis.Response;
 	try {
+		const headers = new Headers(opts.headers);
+		if (contentType) headers.set("Content-Type", contentType);
+		headers.set("User-Agent", httpUserAgent());
 		// Make the HTTP request
 		response = await (opts.customFetch ?? fetch)(
 			new globalThis.Request(opts.url, {
 				method: opts.method,
-				headers: {
-					...opts.headers,
-					...(contentType
-						? {
-								"Content-Type": contentType,
-							}
-						: {}),
-					"User-Agent": httpUserAgent(),
-				},
+				headers,
 				body: bodyData,
 				credentials: "include",
 				signal: opts.signal,

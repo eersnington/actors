@@ -8,6 +8,13 @@ export interface JsActorKeySegment {
   stringValue?: string
   numberValue?: number
 }
+export interface JsActorInvocationTraceContext {
+  rayId: string
+  traceId: string
+  spanId: string
+  traceparent: string
+  tracestate?: string
+}
 export interface JsHttpRequest {
   method: string
   uri: string
@@ -301,6 +308,7 @@ export declare class ActorContext {
   saveState(payload: StateDeltaPayload): Promise<void>
   saveStateAndWorkflowBatch(writes: Array<WorkflowKvWritePayload>): Promise<void>
   actorId(): string
+  invocationTraceContext(): JsActorInvocationTraceContext | null
   name(): string
   key(): Array<JsActorKeySegment>
   region(): string

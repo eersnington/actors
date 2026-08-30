@@ -18,7 +18,8 @@ use napi_derive::napi;
 use parking_lot::Mutex;
 use rivetkit_core::types::ActorKeySegment;
 use rivetkit_core::{
-	ActorContext as CoreActorContext, ActorInvocationTelemetry, ActorWorkKind,
+	ActorContext as CoreActorContext, ActorInvocationTelemetry, ActorInvocationTraceContext,
+	ActorWorkKind,
 	ConnHandle as CoreConnHandle, KeepAwakeRegion, Request as CoreRequest, RequestSaveOpts, StateDelta,
 	WebSocketCallbackRegion, WorkflowKvWrite,
 };
@@ -79,6 +80,27 @@ pub struct JsActorKeySegment {
 	pub kind: String,
 	pub string_value: Option<String>,
 	pub number_value: Option<f64>,
+}
+
+#[napi(object)]
+pub struct JsActorInvocationTraceContext {
+	pub ray_id: String,
+	pub trace_id: String,
+	pub span_id: String,
+	pub traceparent: String,
+	pub tracestate: Option<String>,
+}
+
+impl From<ActorInvocationTraceContext> for JsActorInvocationTraceContext {
+	fn from(value: ActorInvocationTraceContext) -> Self {
+		Self {
+			ray_id: value.ray_id,
+			trace_id: value.trace_id,
+			span_id: value.span_id,
+			traceparent: value.traceparent,
+			tracestate: value.tracestate,
+		}
+	}
 }
 
 #[napi(object)]
@@ -458,6 +480,14 @@ impl ActorContext {
 	#[napi]
 	pub fn actor_id(&self) -> String {
 		self.inner.actor_id().to_owned()
+	}
+
+	#[napi]
+	pub fn invocation_trace_context(&self) -> Option<JsActorInvocationTraceContext> {
+		self.invocation_telemetry
+			.as_ref()
+			.and_then(ActorInvocationTelemetry::trace_context)
+			.map(Into::into)
 	}
 
 	#[napi]
