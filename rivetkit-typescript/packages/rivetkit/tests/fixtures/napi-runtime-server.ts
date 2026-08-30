@@ -47,6 +47,17 @@ const correlationSource = actor({
 	state: {
 		scheduledToken: "",
 	},
+	onWake: async () => {},
+	onConnect: async () => {},
+	onDisconnect: async () => {},
+	onWebSocket: (c, websocket) => {
+		websocket.send(
+			JSON.stringify({
+				actorId: c.actorId,
+				connectionId: c.conn.id,
+			}),
+		);
+	},
 	actions: {
 		scheduleOnce: async (c, token: string) => {
 			await c.schedule.after(100, "completeScheduled", token);
