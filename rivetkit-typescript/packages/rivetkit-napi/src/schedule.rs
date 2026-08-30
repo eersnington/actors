@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
-use rivetkit_core::ActorContext as CoreActorContext;
+use rivetkit_core::{ActorContext as CoreActorContext, ActorInvocationTelemetry};
 use rivetkit_core::actor::schedule::{
 	CronFire as CoreCronFire, CronJobInfo as CoreCronJobInfo, ScheduleKind,
 	ScheduledEventInfo as CoreScheduledEventInfo,
@@ -53,11 +53,19 @@ pub struct JsCronFire {
 #[napi]
 pub struct Schedule {
 	inner: CoreActorContext,
+	telemetry: Option<ActorInvocationTelemetry>,
 }
 
 impl Schedule {
-	pub(crate) fn new(inner: CoreActorContext) -> Self {
-		Self { inner }
+	pub(crate) fn new(
+		inner: CoreActorContext,
+		telemetry: Option<ActorInvocationTelemetry>,
+	) -> Self {
+		Self { inner, telemetry }
+	}
+
+	fn durable_trace_context(&self) -> Option<rivetkit_core::telemetry::DurableTraceContext> {
+		self.telemetry.as_ref()?.trace_context().map(Into::into)
 	}
 }
 
@@ -80,10 +88,11 @@ impl Schedule {
 			)
 		})?;
 		self.inner
-			.after(
+			.after_with_trace_context(
 				Duration::from_millis(duration_ms),
 				&action_name,
 				args.as_ref(),
+				self.durable_trace_context(),
 			)
 			.await
 			.map_err(napi_anyhow_error)
@@ -97,7 +106,12 @@ impl Schedule {
 		args: Buffer,
 	) -> napi::Result<String> {
 		self.inner
-			.at(timestamp_ms, &action_name, args.as_ref())
+			.at_with_trace_context(
+				timestamp_ms,
+				&action_name,
+				args.as_ref(),
+				self.durable_trace_context(),
+			)
 			.await
 			.map_err(napi_anyhow_error)
 	}
@@ -139,13 +153,14 @@ impl Schedule {
 		max_history: Option<i64>,
 	) -> napi::Result<()> {
 		self.inner
-			.cron_set(
+			.cron_set_with_trace_context(
 				&name,
 				&expression,
 				timezone.as_deref(),
 				&action_name,
 				args.as_ref(),
 				max_history,
+				self.durable_trace_context(),
 			)
 			.await
 			.map_err(napi_anyhow_error)
@@ -161,7 +176,14 @@ impl Schedule {
 		max_history: Option<i64>,
 	) -> napi::Result<()> {
 		self.inner
-			.cron_every(&name, interval_ms, &action_name, args.as_ref(), max_history)
+			.cron_every_with_trace_context(
+				&name,
+				interval_ms,
+				&action_name,
+				args.as_ref(),
+				max_history,
+				self.durable_trace_context(),
+			)
 			.await
 			.map_err(napi_anyhow_error)
 	}

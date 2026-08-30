@@ -22,6 +22,7 @@ use crate::error::{ScheduleRuntimeError, client_error_message, client_error_meta
 use crate::runtime::RuntimeSpawner;
 use crate::sqlite::{BindParam, ColumnValue, SqliteBatchStatement};
 use crate::time::{SystemTime, UNIX_EPOCH, sleep};
+use crate::telemetry::DurableTraceContext;
 
 const CRON_ID_PREFIX: &str = "cron:";
 const HISTORY_RUNNING: i64 = 0;
@@ -140,6 +141,7 @@ pub(crate) struct DueScheduleDispatch {
 	pub args: Vec<u8>,
 	pub fire: ScheduledFireInfo,
 	pub history_id: Option<i64>,
+	pub trace_context: Option<DurableTraceContext>,
 }
 
 #[derive(Clone, Debug)]
@@ -154,6 +156,7 @@ struct StoredSchedule {
 	interval_ms: Option<i64>,
 	last_started_at: Option<i64>,
 	max_history: i64,
+	trace_context: Option<DurableTraceContext>,
 }
 
 impl ActorContext {
@@ -181,12 +184,37 @@ impl ActorContext {
 		action_name: &str,
 		args: &[u8],
 	) -> Result<String> {
+		self.after_with_trace_context(duration, action_name, args, None)
+			.await
+	}
+
+	/// Creates a delayed action carrying correlation from its originating invocation.
+	pub async fn after_with_trace_context(
+		&self,
+		duration: Duration,
+		action_name: &str,
+		args: &[u8],
+		trace_context: Option<DurableTraceContext>,
+	) -> Result<String> {
 		let duration_ms = i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
 		let timestamp_ms = self.schedule_now_timestamp_ms().saturating_add(duration_ms);
-		self.at(timestamp_ms, action_name, args).await
+		self.at_with_trace_context(timestamp_ms, action_name, args, trace_context)
+			.await
 	}
 
 	pub async fn at(&self, timestamp_ms: i64, action_name: &str, args: &[u8]) -> Result<String> {
+		self.at_with_trace_context(timestamp_ms, action_name, args, None)
+			.await
+	}
+
+	/// Creates a scheduled action carrying correlation from its originating invocation.
+	pub async fn at_with_trace_context(
+		&self,
+		timestamp_ms: i64,
+		action_name: &str,
+		args: &[u8],
+		trace_context: Option<DurableTraceContext>,
+	) -> Result<String> {
 		let _mutation = self.0.schedule_mutation_lock.lock().await;
 		self.ensure_schedule_capacity(false).await?;
 		let event_id = Uuid::new_v4().to_string();
@@ -204,6 +232,9 @@ impl ActorContext {
 					BindParam::Null,
 					BindParam::Null,
 					BindParam::Integer(0),
+					optional_owned_text_param(trace_context.as_ref().map(|value| value.ray_id.clone())),
+					optional_owned_text_param(trace_context.as_ref().map(|value| value.traceparent.clone())),
+					optional_owned_text_param(trace_context.and_then(|value| value.tracestate)),
 				]),
 			)
 			.await
@@ -296,6 +327,30 @@ impl ActorContext {
 		args: &[u8],
 		max_history: Option<i64>,
 	) -> Result<()> {
+		self.cron_set_with_trace_context(
+			name,
+			expression,
+			timezone,
+			action_name,
+			args,
+			max_history,
+			None,
+		)
+		.await
+	}
+
+	/// Creates or updates a cron job carrying correlation from its originating invocation.
+	#[allow(clippy::too_many_arguments)]
+	pub async fn cron_set_with_trace_context(
+		&self,
+		name: &str,
+		expression: &str,
+		timezone: Option<&str>,
+		action_name: &str,
+		args: &[u8],
+		max_history: Option<i64>,
+		trace_context: Option<DurableTraceContext>,
+	) -> Result<()> {
 		validate_name(name)?;
 		let timezone = timezone.unwrap_or("UTC");
 		let timezone_parsed = parse_timezone(timezone)?;
@@ -326,6 +381,7 @@ impl ActorContext {
 			Some(timezone),
 			None,
 			max_history,
+			trace_context,
 		)
 		.await?;
 		self.prune_schedule_history(&event_id, max_history).await?;
@@ -341,6 +397,27 @@ impl ActorContext {
 		action_name: &str,
 		args: &[u8],
 		max_history: Option<i64>,
+	) -> Result<()> {
+		self.cron_every_with_trace_context(
+			name,
+			interval_ms,
+			action_name,
+			args,
+			max_history,
+			None,
+		)
+		.await
+	}
+
+	/// Creates or updates an interval job carrying correlation from its originating invocation.
+	pub async fn cron_every_with_trace_context(
+		&self,
+		name: &str,
+		interval_ms: i64,
+		action_name: &str,
+		args: &[u8],
+		max_history: Option<i64>,
+		trace_context: Option<DurableTraceContext>,
 	) -> Result<()> {
 		validate_name(name)?;
 		if interval_ms < MIN_INTERVAL_MS {
@@ -374,6 +451,7 @@ impl ActorContext {
 			None,
 			Some(interval_ms),
 			max_history,
+			trace_context,
 		)
 		.await?;
 		self.prune_schedule_history(&event_id, max_history).await?;
@@ -394,6 +472,7 @@ impl ActorContext {
 		timezone: Option<&str>,
 		interval_ms: Option<i64>,
 		max_history: i64,
+		trace_context: Option<DurableTraceContext>,
 	) -> Result<()> {
 		self.sql()
 			.execute(
@@ -409,6 +488,9 @@ impl ActorContext {
 					optional_i64_param(interval_ms),
 					BindParam::Null,
 					BindParam::Integer(max_history),
+					optional_owned_text_param(trace_context.as_ref().map(|value| value.ray_id.clone())),
+					optional_owned_text_param(trace_context.as_ref().map(|value| value.traceparent.clone())),
+					optional_owned_text_param(trace_context.and_then(|value| value.tracestate)),
 				]),
 			)
 			.await
@@ -627,6 +709,7 @@ impl ActorContext {
 						fired_at: now_ms,
 					},
 					history_id: None,
+					trace_context: event.trace_context,
 				});
 				continue;
 			}
@@ -700,6 +783,7 @@ impl ActorContext {
 					fired_at: now_ms,
 				},
 				history_id,
+				trace_context: event.trace_context,
 			});
 		}
 		self.mark_schedule_dirty();
@@ -1245,6 +1329,19 @@ fn read_stored_schedule(row: &[ColumnValue]) -> Result<StoredSchedule> {
 		interval_ms: read_optional_i64(row, 7, "interval_ms")?,
 		last_started_at: read_optional_i64(row, 8, "last_started_at")?,
 		max_history: read_i64(row, 9, "max_history")?,
+		trace_context: match (
+			read_optional_text(row, 10, "ray_id")?,
+			read_optional_text(row, 11, "traceparent")?,
+			read_optional_text(row, 12, "tracestate")?,
+		) {
+			(Some(ray_id), Some(traceparent), tracestate) => Some(DurableTraceContext {
+				ray_id,
+				traceparent,
+				tracestate,
+			}),
+			(None, None, None) => None,
+			_ => return Err(invalid_row(&event_id, "trace context columns are incomplete")),
+		},
 	};
 	match event.kind {
 		ScheduleKind::At

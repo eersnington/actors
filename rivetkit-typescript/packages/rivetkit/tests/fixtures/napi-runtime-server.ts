@@ -44,7 +44,19 @@ const correlationTarget = actor({
 });
 
 const correlationSource = actor({
+	state: {
+		scheduledToken: "",
+	},
 	actions: {
+		scheduleOnce: async (c, token: string) => {
+			await c.schedule.after(100, "completeScheduled", token);
+			return token;
+		},
+		completeScheduled: (c, token: string) => {
+			c.state.scheduledToken = token;
+			return token;
+		},
+		getScheduledToken: (c) => c.state.scheduledToken,
 		relay: async (c, token: string) => {
 			c.log.info({
 				msg: "sending correlated actor call",

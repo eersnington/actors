@@ -1644,8 +1644,10 @@ impl ActorContext {
 		let action = dispatch.action;
 		let args = dispatch.args;
 		let scheduled_fire = dispatch.fire;
+		let is_one_shot = scheduled_fire.kind == crate::actor::schedule::ScheduleKind::At;
 		let recurring_name = scheduled_fire.name.clone();
 		let history_id = dispatch.history_id;
+		let trace_context = dispatch.trace_context;
 		let internal_keep_awake_region = self.begin_work_region(ActorWorkKind::InternalKeepAwake);
 
 		self.track_shutdown_task(async move {
@@ -1654,15 +1656,19 @@ impl ActorContext {
 			let started_at = Instant::now();
 			let action_name = action.clone();
 			let (reply_tx, reply_rx) = oneshot::channel();
-			let telemetry = crate::telemetry::ActorInvocationTelemetry::start(
+			let telemetry = crate::telemetry::ActorInvocationTelemetry::start_with_link(
 				ctx.actor_id().to_owned(),
 				ctx.name().to_owned(),
 				format_actor_key(ctx.key()),
 				&action_name,
 				"scheduled",
+				trace_context
+					.as_ref()
+					.filter(|_| is_one_shot)
+					.map(|value| value.ray_id.clone()),
 				None,
 				None,
-				None,
+				trace_context.as_ref(),
 			);
 
 			let mut dispatch_error = None;

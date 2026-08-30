@@ -19,6 +19,24 @@ pub struct ActorInvocationTraceContext {
 	pub tracestate: Option<String>,
 }
 
+/// Trace correlation persisted with work that may run after its creator exits.
+#[derive(Clone, Debug)]
+pub struct DurableTraceContext {
+	pub ray_id: String,
+	pub traceparent: String,
+	pub tracestate: Option<String>,
+}
+
+impl From<ActorInvocationTraceContext> for DurableTraceContext {
+	fn from(value: ActorInvocationTraceContext) -> Self {
+		Self {
+			ray_id: value.ray_id,
+			traceparent: value.traceparent,
+			tracestate: value.tracestate,
+		}
+	}
+}
+
 /// Telemetry shared by the automatic spans created during one actor invocation.
 ///
 /// The context crosses foreign-runtime boundaries explicitly. It does not rely
@@ -43,6 +61,30 @@ impl ActorInvocationTelemetry {
 		traceparent: Option<&str>,
 		tracestate: Option<&str>,
 	) -> Option<Self> {
+		Self::start_with_link(
+			actor_id,
+			actor_name,
+			actor_key,
+			action_name,
+			invocation_type,
+			ray_id,
+			traceparent,
+			tracestate,
+			None,
+		)
+	}
+
+	pub(crate) fn start_with_link(
+		actor_id: String,
+		actor_name: String,
+		actor_key: String,
+		action_name: &str,
+		invocation_type: &'static str,
+		ray_id: Option<String>,
+		traceparent: Option<&str>,
+		tracestate: Option<&str>,
+		link: Option<&DurableTraceContext>,
+	) -> Option<Self> {
 		if !tracing::enabled!(target: "rivetkit::telemetry", tracing::Level::INFO) {
 			return None;
 		}
@@ -64,6 +106,9 @@ impl ActorInvocationTelemetry {
 			error.type = tracing::field::Empty,
 		);
 		set_remote_parent(&span, traceparent, tracestate);
+		if let Some(link) = link.and_then(parse_durable_link) {
+			span.add_link(link);
+		}
 		Some(Self {
 			span: Arc::new(Mutex::new(Some(span))),
 			ray_id,
@@ -146,6 +191,10 @@ impl ActorInvocationTelemetry {
 	}
 }
 
+fn parse_durable_link(link: &DurableTraceContext) -> Option<SpanContext> {
+	parse_span_context(&link.traceparent, link.tracestate.as_deref(), true)
+}
+
 pub(crate) fn set_remote_parent(
 	span: &tracing::Span,
 	traceparent: Option<&str>,
@@ -154,6 +203,17 @@ pub(crate) fn set_remote_parent(
 	let Some(traceparent) = traceparent else {
 		return;
 	};
+	let Some(parent) = parse_span_context(traceparent, tracestate, true) else {
+		return;
+	};
+	let _ = span.set_parent(opentelemetry::Context::new().with_remote_span_context(parent));
+}
+
+fn parse_span_context(
+	traceparent: &str,
+	tracestate: Option<&str>,
+	is_remote: bool,
+) -> Option<SpanContext> {
 	// Accept only W3C version 00 until a later version's additional fields can
 	// be interpreted without guessing at parent or sampling semantics.
 	let mut parts = traceparent.split('-');
@@ -164,27 +224,26 @@ pub(crate) fn set_remote_parent(
 		parts.next(),
 		parts.next(),
 	) else {
-		return;
+		return None;
 	};
 	let (Ok(trace_id), Ok(span_id), Ok(flags)) = (
 		TraceId::from_hex(trace_id),
 		SpanId::from_hex(span_id),
 		u8::from_str_radix(flags, 16),
 	) else {
-		return;
+		return None;
 	};
 	if trace_id == TraceId::INVALID || span_id == SpanId::INVALID {
-		return;
+		return None;
 	}
 	let trace_state = tracestate
 		.and_then(|value| TraceState::from_str(value).ok())
 		.unwrap_or_default();
-	let parent = SpanContext::new(
+	Some(SpanContext::new(
 		trace_id,
 		span_id,
 		TraceFlags::new(flags),
-		true,
+		is_remote,
 		trace_state,
-	);
-	let _ = span.set_parent(opentelemetry::Context::new().with_remote_span_context(parent));
+	))
 }

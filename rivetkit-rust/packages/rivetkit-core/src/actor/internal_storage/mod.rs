@@ -159,6 +159,9 @@ pub(crate) async fn import_legacy_actor_snapshot(
 				BindParam::Null,
 				BindParam::Null,
 				BindParam::Integer(0),
+				BindParam::Null,
+				BindParam::Null,
+				BindParam::Null,
 			]),
 		});
 	}
