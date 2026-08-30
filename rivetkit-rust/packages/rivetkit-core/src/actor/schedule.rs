@@ -233,7 +233,11 @@ impl ActorContext {
 					BindParam::Null,
 					BindParam::Integer(0),
 					optional_owned_text_param(trace_context.as_ref().map(|value| value.ray_id.clone())),
-					optional_owned_text_param(trace_context.as_ref().map(|value| value.traceparent.clone())),
+					optional_owned_text_param(
+						trace_context
+							.as_ref()
+							.and_then(|value| value.traceparent.clone()),
+					),
 					optional_owned_text_param(trace_context.and_then(|value| value.tracestate)),
 				]),
 			)
@@ -489,7 +493,11 @@ impl ActorContext {
 					BindParam::Null,
 					BindParam::Integer(max_history),
 					optional_owned_text_param(trace_context.as_ref().map(|value| value.ray_id.clone())),
-					optional_owned_text_param(trace_context.as_ref().map(|value| value.traceparent.clone())),
+					optional_owned_text_param(
+						trace_context
+							.as_ref()
+							.and_then(|value| value.traceparent.clone()),
+					),
 					optional_owned_text_param(trace_context.and_then(|value| value.tracestate)),
 				]),
 			)
@@ -1334,7 +1342,7 @@ fn read_stored_schedule(row: &[ColumnValue]) -> Result<StoredSchedule> {
 			read_optional_text(row, 11, "traceparent")?,
 			read_optional_text(row, 12, "tracestate")?,
 		) {
-			(Some(ray_id), Some(traceparent), tracestate) => Some(DurableTraceContext {
+			(Some(ray_id), traceparent, tracestate) if traceparent.is_some() || tracestate.is_none() => Some(DurableTraceContext {
 				ray_id,
 				traceparent,
 				tracestate,

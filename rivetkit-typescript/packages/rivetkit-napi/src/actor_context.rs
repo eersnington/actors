@@ -85,20 +85,32 @@ pub struct JsActorKeySegment {
 #[napi(object)]
 pub struct JsActorInvocationTraceContext {
 	pub ray_id: String,
-	pub trace_id: String,
-	pub span_id: String,
-	pub traceparent: String,
+	pub trace_id: Option<String>,
+	pub span_id: Option<String>,
+	pub trace_flags: Option<u8>,
+	pub traceparent: Option<String>,
 	pub tracestate: Option<String>,
 }
 
 impl From<ActorInvocationTraceContext> for JsActorInvocationTraceContext {
 	fn from(value: ActorInvocationTraceContext) -> Self {
-		Self {
-			ray_id: value.ray_id,
-			trace_id: value.trace_id,
-			span_id: value.span_id,
-			traceparent: value.traceparent,
-			tracestate: value.tracestate,
+		match value.span {
+			Some(span) => Self {
+				ray_id: value.ray_id,
+				trace_id: Some(span.trace_id),
+				span_id: Some(span.span_id),
+				trace_flags: Some(span.trace_flags),
+				traceparent: Some(span.traceparent),
+				tracestate: span.tracestate,
+			},
+			None => Self {
+				ray_id: value.ray_id,
+				trace_id: None,
+				span_id: None,
+				trace_flags: None,
+				traceparent: None,
+				tracestate: None,
+			},
 		}
 	}
 }

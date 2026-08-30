@@ -15,6 +15,7 @@ import type {
 	CoreRuntime,
 	RegistryHandle,
 	RuntimeActorConfig,
+	RuntimeActorInvocationTraceContext,
 	RuntimeApplicationFetch,
 	RuntimeApplicationListenerConfig,
 	RuntimeBytes,
@@ -534,6 +535,32 @@ export class NapiCoreRuntime implements CoreRuntime {
 		return asNativeActorContext(ctx).actorId();
 	}
 
+	actorInvocationTraceContext(
+		ctx: ActorContextHandle,
+	): RuntimeActorInvocationTraceContext | undefined {
+		const context = asNativeActorContext(ctx).invocationTraceContext();
+		if (!context) return undefined;
+		if (
+			!context.traceId ||
+			!context.spanId ||
+			context.traceFlags === undefined ||
+			!context.traceparent
+		) {
+			return { rayId: context.rayId };
+		}
+		return {
+			rayId: context.rayId,
+			span: {
+				traceId: context.traceId,
+				spanId: context.spanId,
+				traceFlags: context.traceFlags,
+				traceparent: context.traceparent,
+				...(context.tracestate
+					? { tracestate: context.tracestate }
+					: {}),
+			},
+		};
+	}
 	runWithActorInvocationContext<T>(ctx: ActorContextHandle, run: () => T): T {
 		const nativeCtx = asNativeActorContext(ctx);
 		return this.#invocationContext.run(
@@ -545,21 +572,6 @@ export class NapiCoreRuntime implements CoreRuntime {
 		);
 	}
 
-	actorInvocationTraceContext(ctx: ActorContextHandle) {
-		const context = asNativeActorContext(ctx).invocationTraceContext();
-		if (!context) return undefined;
-		return {
-			rayId: context.rayId,
-			span: {
-				traceId: context.traceId,
-				spanId: context.spanId,
-				traceparent: context.traceparent,
-				...(context.tracestate
-					? { tracestate: context.tracestate }
-					: {}),
-			},
-		};
-	}
 	actorName(ctx: ActorContextHandle): string {
 		return asNativeActorContext(ctx).name();
 	}

@@ -943,16 +943,14 @@ impl ActorTask {
 								Ok(result) => {
 									let result =
 										result.map_err(|error| ctx.attach_actor_to_error(error));
-									if let Some(telemetry) = &invocation_telemetry {
-										let error_type = result.as_ref().err().map(|error| {
-											let structured = rivet_error::RivetError::extract(error);
-											format!("{}.{}", structured.group(), structured.code())
-										});
-										telemetry.finish(
-											if result.is_ok() { "OK" } else { "ERROR" },
-											error_type,
-										);
-									}
+									let error_type = result.as_ref().err().map(|error| {
+										let structured = rivet_error::RivetError::extract(error);
+										format!("{}.{}", structured.group(), structured.code())
+									});
+									invocation_telemetry.finish(
+										if result.is_ok() { "OK" } else { "ERROR" },
+										error_type,
+									);
 									tracing::info!(
 										actor_id = %actor_id,
 										action_name = %action_name_for_log,
@@ -962,12 +960,10 @@ impl ActorTask {
 									let _ = reply.send(result);
 								}
 								Err(_) => {
-									if let Some(telemetry) = &invocation_telemetry {
-										telemetry.finish(
-											"ERROR",
-											Some("actor.dropped_reply".to_owned()),
-										);
-									}
+									invocation_telemetry.finish(
+										"ERROR",
+										Some("actor.dropped_reply".to_owned()),
+									);
 									tracing::warn!(
 										actor_id = %actor_id,
 										action_name = %action_name_for_log,

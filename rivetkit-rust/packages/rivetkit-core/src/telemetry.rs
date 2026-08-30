@@ -1,10 +1,11 @@
 //! Automatic telemetry context for one actor invocation.
 
 use std::future::Future;
-use std::str::FromStr as _;
 use std::sync::Arc;
 
-use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState};
+use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator as _};
+use opentelemetry::trace::{SpanContext, TraceContextExt as _};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use parking_lot::Mutex;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
@@ -15,8 +16,14 @@ use crate::{ActorContext, Request, format_actor_key};
 #[derive(Clone, Debug)]
 pub struct ActorInvocationTraceContext {
 	pub ray_id: String,
+	pub span: Option<ActorInvocationSpanContext>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ActorInvocationSpanContext {
 	pub trace_id: String,
 	pub span_id: String,
+	pub trace_flags: u8,
 	pub traceparent: String,
 	pub tracestate: Option<String>,
 }
@@ -25,7 +32,7 @@ pub struct ActorInvocationTraceContext {
 #[derive(Clone, Debug)]
 pub struct DurableTraceContext {
 	pub ray_id: String,
-	pub traceparent: String,
+	pub traceparent: Option<String>,
 	pub tracestate: Option<String>,
 }
 
@@ -179,7 +186,7 @@ fn header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
 	request.headers().get(name)?.to_str().ok()
 }
 
-fn invocation_ray_id(headers: &http::HeaderMap) -> Option<String> {
+pub(crate) fn invocation_ray_id(headers: &http::HeaderMap) -> Option<String> {
 	["x-rivetkit-ray-id", "x-rivet-ray-id"]
 		.into_iter()
 		.filter_map(|name| headers.get(name)?.to_str().ok())
@@ -195,10 +202,17 @@ fn invocation_ray_id(headers: &http::HeaderMap) -> Option<String> {
 
 impl From<ActorInvocationTraceContext> for DurableTraceContext {
 	fn from(value: ActorInvocationTraceContext) -> Self {
-		Self {
-			ray_id: value.ray_id,
-			traceparent: value.traceparent,
-			tracestate: value.tracestate,
+		match value.span {
+			Some(span) => Self {
+				ray_id: value.ray_id,
+				traceparent: Some(span.traceparent),
+				tracestate: span.tracestate,
+			},
+			None => Self {
+				ray_id: value.ray_id,
+				traceparent: None,
+				tracestate: None,
+			},
 		}
 	}
 }
@@ -209,11 +223,18 @@ impl From<ActorInvocationTraceContext> for DurableTraceContext {
 /// on task-local state surviving an N-API callback.
 #[derive(Clone, Debug)]
 pub struct ActorInvocationTelemetry {
-	span: Arc<Mutex<Option<tracing::Span>>>,
+	span: Arc<Mutex<InvocationSpan>>,
 	ray_id: String,
 	actor_id: String,
 	actor_name: String,
 	actor_key: String,
+}
+
+#[derive(Debug)]
+enum InvocationSpan {
+	Disabled,
+	Active(tracing::Span),
+	Finished,
 }
 
 impl ActorInvocationTelemetry {
@@ -226,7 +247,7 @@ impl ActorInvocationTelemetry {
 		ray_id: Option<String>,
 		traceparent: Option<&str>,
 		tracestate: Option<&str>,
-	) -> Option<Self> {
+	) -> Self {
 		Self::start_with_link(
 			actor_id,
 			actor_name,
@@ -250,11 +271,17 @@ impl ActorInvocationTelemetry {
 		traceparent: Option<&str>,
 		tracestate: Option<&str>,
 		link: Option<&DurableTraceContext>,
-	) -> Option<Self> {
-		if !tracing::enabled!(target: "rivetkit::telemetry", tracing::Level::INFO) {
-			return None;
-		}
+	) -> Self {
 		let ray_id = ray_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+		if !tracing::enabled!(target: "rivetkit::telemetry", tracing::Level::INFO) {
+			return Self {
+				span: Arc::new(Mutex::new(InvocationSpan::Disabled)),
+				ray_id,
+				actor_id,
+				actor_name,
+				actor_key,
+			};
+		}
 		let span_name = format!("{actor_name}.{action_name}");
 		let span = tracing::info_span!(
 			target: "rivetkit::telemetry",
@@ -275,18 +302,19 @@ impl ActorInvocationTelemetry {
 		if let Some(link) = link.and_then(parse_durable_link) {
 			span.add_link(link);
 		}
-		Some(Self {
-			span: Arc::new(Mutex::new(Some(span))),
+		Self {
+			span: Arc::new(Mutex::new(InvocationSpan::Active(span))),
 			ray_id,
 			actor_id,
 			actor_name,
 			actor_key,
-		})
+		}
 	}
 
 	pub(crate) fn finish(&self, status: &'static str, error_type: Option<String>) {
-		let Some(span) = self.span.lock().take() else {
-			return;
+		let span = match std::mem::replace(&mut *self.span.lock(), InvocationSpan::Finished) {
+			InvocationSpan::Active(span) => span,
+			InvocationSpan::Disabled | InvocationSpan::Finished => return,
 		};
 		span.record("otel.status_code", status);
 		if let Some(error_type) = error_type.as_deref() {
@@ -296,39 +324,60 @@ impl ActorInvocationTelemetry {
 
 	/// Returns the active invocation context for outbound calls and correlated logs.
 	pub fn trace_context(&self) -> Option<ActorInvocationTraceContext> {
-		let span = self.span.lock().as_ref()?.clone();
+		let span = match &*self.span.lock() {
+			InvocationSpan::Disabled => {
+				return Some(ActorInvocationTraceContext {
+					ray_id: self.ray_id.clone(),
+					span: None,
+				});
+			}
+			InvocationSpan::Active(span) => span.clone(),
+			InvocationSpan::Finished => return None,
+		};
 		let context = span.context();
 		let context_span = context.span();
 		let span_context = context_span.span_context();
 		if !span_context.is_valid() {
-			return None;
+			return Some(ActorInvocationTraceContext {
+				ray_id: self.ray_id.clone(),
+				span: None,
+			});
 		}
 		let tracestate = span_context.trace_state().header();
+		let mut carrier = TraceHeaders::default();
+		TraceContextPropagator::new().inject_context(&context, &mut carrier);
 
 		Some(ActorInvocationTraceContext {
 			ray_id: self.ray_id.clone(),
-			trace_id: span_context.trace_id().to_string(),
-			span_id: span_context.span_id().to_string(),
-			traceparent: format!(
-				"00-{}-{}-{:02x}",
-				span_context.trace_id(),
-				span_context.span_id(),
-				span_context.trace_flags().to_u8(),
-			),
-			tracestate: (!tracestate.is_empty()).then_some(tracestate),
+			span: carrier.traceparent.map(|traceparent| ActorInvocationSpanContext {
+				trace_id: span_context.trace_id().to_string(),
+				span_id: span_context.span_id().to_string(),
+				trace_flags: span_context.trace_flags().to_u8(),
+				traceparent,
+				tracestate: carrier
+					.tracestate
+					.or_else(|| (!tracestate.is_empty()).then_some(tracestate)),
+			}),
 		})
 	}
 
 	/// Records one safe runtime operation beneath this invocation.
-	pub async fn trace<T, E>(
+	pub async fn trace<T>(
 		&self,
 		system: &'static str,
 		operation: &'static str,
-		future: impl Future<Output = Result<T, E>>,
-	) -> Result<T, E> {
-		let Some(parent) = self.span.lock().as_ref().cloned() else {
-			// The invocation has already replied. A retained foreign-runtime context
-			// must not attach later work to a completed action.
+		future: impl Future<Output = anyhow::Result<T>>,
+	) -> anyhow::Result<T> {
+		let parent = {
+			let span = self.span.lock();
+			match &*span {
+				InvocationSpan::Active(parent) => Some(parent.clone()),
+				InvocationSpan::Disabled | InvocationSpan::Finished => None,
+			}
+		};
+		let Some(parent) = parent else {
+			// Disabled telemetry and foreign-runtime work retained after the reply
+			// both run without attaching to an invocation span.
 			return future.await;
 		};
 		// This short-lived clone deliberately keeps the parent open until an
@@ -347,18 +396,26 @@ impl ActorInvocationTelemetry {
 			rivet.actor.key = %self.actor_key,
 			rivet.ray.id = %self.ray_id,
 			otel.status_code = tracing::field::Empty,
+			error.type = tracing::field::Empty,
 		);
 		let result = future.instrument(span.clone()).await;
 		span.record(
 			"otel.status_code",
 			if result.is_ok() { "OK" } else { "ERROR" },
 		);
+		if let Err(error) = &result {
+			let structured = rivet_error::RivetError::extract(error);
+			span.record(
+				"error.type",
+				format!("{}.{}", structured.group(), structured.code()),
+			);
+		}
 		result
 	}
 }
 
 fn parse_durable_link(link: &DurableTraceContext) -> Option<SpanContext> {
-	parse_span_context(&link.traceparent, link.tracestate.as_deref(), true)
+	parse_span_context(link.traceparent.as_deref()?, link.tracestate.as_deref())
 }
 
 pub(crate) fn set_remote_parent(
@@ -369,7 +426,7 @@ pub(crate) fn set_remote_parent(
 	let Some(traceparent) = traceparent else {
 		return;
 	};
-	let Some(parent) = parse_span_context(traceparent, tracestate, true) else {
+	let Some(parent) = parse_span_context(traceparent, tracestate) else {
 		return;
 	};
 	let _ = span.set_parent(opentelemetry::Context::new().with_remote_span_context(parent));
@@ -378,38 +435,45 @@ pub(crate) fn set_remote_parent(
 fn parse_span_context(
 	traceparent: &str,
 	tracestate: Option<&str>,
-	is_remote: bool,
 ) -> Option<SpanContext> {
-	// Accept only W3C version 00 until a later version's additional fields can
-	// be interpreted without guessing at parent or sampling semantics.
-	let mut parts = traceparent.split('-');
-	let (Some("00"), Some(trace_id), Some(span_id), Some(flags), None) = (
-		parts.next(),
-		parts.next(),
-		parts.next(),
-		parts.next(),
-		parts.next(),
-	) else {
-		return None;
+	let carrier = TraceHeaders {
+		traceparent: Some(traceparent.to_owned()),
+		tracestate: tracestate.map(str::to_owned),
 	};
-	let (Ok(trace_id), Ok(span_id), Ok(flags)) = (
-		TraceId::from_hex(trace_id),
-		SpanId::from_hex(span_id),
-		u8::from_str_radix(flags, 16),
-	) else {
-		return None;
-	};
-	if trace_id == TraceId::INVALID || span_id == SpanId::INVALID {
-		return None;
+	let context = TraceContextPropagator::new().extract(&carrier);
+	let span_context = context.span().span_context().clone();
+	span_context.is_valid().then_some(span_context)
+}
+
+#[derive(Default)]
+struct TraceHeaders {
+	traceparent: Option<String>,
+	tracestate: Option<String>,
+}
+
+impl Extractor for TraceHeaders {
+	fn get(&self, key: &str) -> Option<&str> {
+		match key {
+			"traceparent" => self.traceparent.as_deref(),
+			"tracestate" => self.tracestate.as_deref(),
+			_ => None,
+		}
 	}
-	let trace_state = tracestate
-		.and_then(|value| TraceState::from_str(value).ok())
-		.unwrap_or_default();
-	Some(SpanContext::new(
-		trace_id,
-		span_id,
-		TraceFlags::new(flags),
-		is_remote,
-		trace_state,
-	))
+
+	fn keys(&self) -> Vec<&str> {
+		["traceparent", "tracestate"]
+			.into_iter()
+			.filter(|key| self.get(key).is_some())
+			.collect()
+	}
+}
+
+impl Injector for TraceHeaders {
+	fn set(&mut self, key: &str, value: String) {
+		match key {
+			"traceparent" => self.traceparent = Some(value),
+			"tracestate" => self.tracestate = Some(value),
+			_ => {}
+		}
+	}
 }

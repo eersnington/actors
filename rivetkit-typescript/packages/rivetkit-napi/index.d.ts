@@ -10,9 +10,10 @@ export interface JsActorKeySegment {
 }
 export interface JsActorInvocationTraceContext {
   rayId: string
-  traceId: string
-  spanId: string
-  traceparent: string
+  traceId?: string
+  spanId?: string
+  traceFlags?: number
+  traceparent?: string
   tracestate?: string
 }
 export interface JsHttpRequest {

@@ -2819,7 +2819,7 @@ export class ActorContextHandleAdapter {
 	get log() {
 		if (!this.#log) {
 			const trace = callNativeSync(() =>
-				this.#runtime.actorInvocationTraceContext?.(this.#ctx),
+				this.#runtime.actorInvocationTraceContext(this.#ctx),
 			);
 			this.#log = logger().child({
 				actor_id: this.actorId,
@@ -2828,8 +2828,12 @@ export class ActorContextHandleAdapter {
 				...(trace
 					? {
 							ray_id: trace.rayId,
-							trace_id: trace.span.traceId,
-							span_id: trace.span.spanId,
+							...(trace.span
+								? {
+										trace_id: trace.span.traceId,
+										span_id: trace.span.spanId,
+									}
+								: {}),
 						}
 					: {}),
 			});

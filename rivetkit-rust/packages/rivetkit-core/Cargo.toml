@@ -50,6 +50,7 @@ include_dir = { workspace = true }
 nix = { workspace = true, optional = true }
 parking_lot.workspace = true
 opentelemetry = { workspace = true, features = ["trace"] }
+opentelemetry_sdk = { workspace = true, features = ["trace"] }
 rand.workspace = true
 reqwest = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
@@ -93,7 +94,6 @@ wasm-bindgen-futures = "0.4"
 web-time = "1.1"
 
 [dev-dependencies]
-opentelemetry_sdk = { workspace = true, features = ["trace"] }
 portpicker.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
