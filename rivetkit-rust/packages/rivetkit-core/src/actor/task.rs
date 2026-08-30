@@ -908,6 +908,7 @@ impl ActorTask {
 					traceparent.as_deref(),
 					tracestate.as_deref(),
 				);
+				let invocation_started_at = Instant::now();
 				tracing::info!(
 					actor_id = %self.ctx.actor_id(),
 					action_name = %name,
@@ -938,53 +939,69 @@ impl ActorTask {
 						let actor_id = self.ctx.actor_id().to_owned();
 						let ctx = self.ctx.clone();
 						let invocation_telemetry = telemetry.clone();
+						let invocation_metrics = self.ctx.metrics().clone();
 						self.ctx.spawn_work(ActorWorkKind::Action, async move {
-							match tracked_reply_rx.await {
-								Ok(result) => {
-									let result =
-										result.map_err(|error| ctx.attach_actor_to_error(error));
-									let error_type = result.as_ref().err().map(|error| {
-										let structured = rivet_error::RivetError::extract(error);
-										format!("{}.{}", structured.group(), structured.code())
-									});
-									invocation_telemetry.finish(
-										if result.is_ok() { "OK" } else { "ERROR" },
-										error_type,
-									);
-									tracing::info!(
-										actor_id = %actor_id,
-										action_name = %action_name_for_log,
-										ok = result.is_ok(),
-										"actor task: tracked reply received, forwarding"
-									);
-									let _ = reply.send(result);
-								}
-								Err(_) => {
-									invocation_telemetry.finish(
-										"ERROR",
-										Some("actor.dropped_reply".to_owned()),
-									);
-									tracing::warn!(
-										actor_id = %actor_id,
-										action_name = %action_name_for_log,
-										"actor task: tracked reply dropped before completion"
-									);
-									let error = ctx.attach_actor_to_error(
-										ActorLifecycleError::DroppedReply.build(),
-									);
-									let _ = reply.send(Err(error));
-								}
+							let result = match tracked_reply_rx.await {
+								Ok(result) => result.map_err(|error| ctx.attach_actor_to_error(error)),
+								Err(_) => Err(ctx.attach_actor_to_error(
+									ActorLifecycleError::DroppedReply.build(),
+								)),
+							};
+							let reply_dropped = result.as_ref().err().is_some_and(|error| {
+								let structured = rivet_error::RivetError::extract(error);
+								structured.group() == "actor" && structured.code() == "dropped_reply"
+							});
+							invocation_metrics.record_invocation(
+								&action_name_for_log,
+								"action",
+								if reply_dropped {
+									"dropped"
+								} else if result.is_ok() {
+									"ok"
+								} else {
+									"error"
+								},
+								invocation_started_at.elapsed(),
+							);
+							let error_type = result.as_ref().err().map(|error| {
+								let structured = rivet_error::RivetError::extract(error);
+								format!("{}.{}", structured.group(), structured.code())
+							});
+							invocation_telemetry.finish(
+								if result.is_ok() { "OK" } else { "ERROR" },
+								error_type,
+							);
+							if reply_dropped {
+								tracing::warn!(
+									actor_id = %actor_id,
+									action_name = %action_name_for_log,
+									"actor task: tracked reply dropped before completion"
+								);
+							} else {
+								tracing::info!(
+									actor_id = %actor_id,
+									action_name = %action_name_for_log,
+									ok = result.is_ok(),
+									"actor task: tracked reply received, forwarding"
+								);
 							}
+							let _ = reply.send(result);
 						});
 					}
 					Err(error) => {
+						let error = self.attach_actor_to_error(error);
+						let structured = rivet_error::RivetError::extract(&error);
+						telemetry.finish(
+							"ERROR",
+							Some(format!("{}.{}", structured.group(), structured.code())),
+						);
 						tracing::warn!(
 							actor_id = %self.ctx.actor_id(),
 							action_name = %action_name_for_log,
 							?error,
 							"actor task: failed to enqueue ActorEvent::Action"
 						);
-						let _ = reply.send(Err(self.attach_actor_to_error(error)));
+						let _ = reply.send(Err(error));
 						self.log_dispatch_command_handled(command_kind, "enqueue_failed");
 					}
 				}

@@ -47,7 +47,7 @@ mod moved_tests {
 	#[test]
 	fn actor_startup_duration_metrics_render() {
 		let actor_name = "counter-startup";
-		let metrics = ActorMetrics::new(actor_name);
+		let metrics = ActorMetrics::new(actor_name, []);
 
 		metrics.observe_create_state(Duration::from_millis(10));
 		metrics.observe_create_vars(Duration::from_millis(20));
@@ -87,13 +87,13 @@ mod moved_tests {
 	#[test]
 	fn startup_timer_records_total_success_and_error() {
 		let success_actor = "counter-startup-total-success";
-		let success_metrics = ActorMetrics::new(success_actor);
+		let success_metrics = ActorMetrics::new(success_actor, []);
 		let mut success_timer = success_metrics.begin_startup_timer();
 		success_timer.set_is_new(true);
 		success_timer.finish_success();
 
 		let error_actor = "counter-startup-total-error";
-		let error_metrics = ActorMetrics::new(error_actor);
+		let error_metrics = ActorMetrics::new(error_actor, []);
 		{
 			let mut error_timer = error_metrics.begin_startup_timer();
 			error_timer.set_is_new(false);
@@ -120,7 +120,7 @@ mod moved_tests {
 	#[test]
 	fn sqlite_metrics_render_lifecycle_and_startup_kind_labels() {
 		let actor_name = "counter-sqlite-labels";
-		let metrics = ActorMetrics::new(actor_name);
+		let metrics = ActorMetrics::new(actor_name, []);
 
 		metrics.begin_startup();
 		metrics.set_startup_is_new(false);
@@ -177,7 +177,7 @@ mod moved_tests {
 	#[test]
 	fn actor_active_count_tracks_metric_lifetime() {
 		let actor_name = "counter-active";
-		let metrics = ActorMetrics::new(actor_name);
+		let metrics = ActorMetrics::new(actor_name, []);
 
 		let rendered = render_global_metrics();
 		let line = rendered
@@ -199,8 +199,8 @@ mod moved_tests {
 	#[test]
 	fn actor_current_gauges_aggregate_by_actor_name() {
 		let actor_name = "counter-gauge-aggregate";
-		let first = ActorMetrics::new(actor_name);
-		let second = ActorMetrics::new(actor_name);
+		let first = ActorMetrics::new(actor_name, []);
+		let second = ActorMetrics::new(actor_name, []);
 
 		first.set_active_connections(2);
 		second.set_active_connections(3);

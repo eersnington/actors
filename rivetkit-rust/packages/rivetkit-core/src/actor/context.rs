@@ -313,7 +313,10 @@ impl ActorContext {
 		legacy_kv: LegacyActorKv,
 		sql: SqliteDb,
 	) -> Self {
-		let metrics = ActorMetrics::new(name.clone());
+		let metrics = ActorMetrics::new(
+			name.clone(),
+			config.actions.iter().map(|action| action.name.clone()),
+		);
 		#[cfg(feature = "sqlite-local")]
 		let mut sql = sql;
 		#[cfg(feature = "sqlite-local")]
@@ -1672,6 +1675,8 @@ impl ActorContext {
 			);
 
 			let mut dispatch_error = None;
+			let mut invocation_status = "ok";
+			let mut action_ran = true;
 			match ctx.try_send_actor_event(
 				ActorEvent::Action {
 					name: action.clone(),
@@ -1685,6 +1690,14 @@ impl ActorContext {
 				Ok(()) => match reply_rx.await {
 					Ok(Ok(_)) => {}
 					Ok(Err(error)) => {
+						let structured = rivet_error::RivetError::extract(&error);
+						invocation_status = if structured.group() == "actor"
+							&& structured.code() == "dropped_reply"
+						{
+							"dropped"
+						} else {
+							"error"
+						};
 						dispatch_error = Some(error);
 						tracing::error!(
 							error = ?dispatch_error.as_ref().expect("just assigned"),
@@ -1694,6 +1707,7 @@ impl ActorContext {
 						);
 					}
 					Err(error) => {
+						invocation_status = "dropped";
 						dispatch_error = Some(error.into());
 						tracing::error!(
 							error = ?dispatch_error.as_ref().expect("just assigned"),
@@ -1704,6 +1718,7 @@ impl ActorContext {
 					}
 				},
 				Err(error) => {
+					action_ran = false;
 					dispatch_error = Some(error);
 					tracing::error!(
 						error = ?dispatch_error.as_ref().expect("just assigned"),
@@ -1721,6 +1736,14 @@ impl ActorContext {
 				if dispatch_error.is_some() { "ERROR" } else { "OK" },
 				error_type,
 			);
+			if action_ran {
+				ctx.metrics().record_invocation(
+					&action_name,
+					"scheduled",
+					invocation_status,
+					started_at.elapsed(),
+				);
+			}
 
 			ctx.finish_schedule_dispatch(&event_id, history_id, dispatch_error.as_ref())
 				.await;
