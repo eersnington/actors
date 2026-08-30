@@ -117,7 +117,7 @@ pub(crate) mod time {
 pub mod types;
 pub mod websocket;
 
-pub use telemetry::ActorInvocationTelemetry;
+pub use telemetry::{ActorInvocationTelemetry, ActorInvocationTraceContext};
 pub use actor::{kv, sqlite};
 
 pub use actor::action::ActionDispatchError;

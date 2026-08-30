@@ -509,6 +509,10 @@ export class NapiCoreRuntime implements CoreRuntime {
 		return asNativeActorContext(ctx).actorId();
 	}
 
+	actorInvocationTraceContext(ctx: ActorContextHandle) {
+		return asNativeActorContext(ctx).invocationTraceContext() ?? undefined;
+	}
+
 	actorName(ctx: ActorContextHandle): string {
 		return asNativeActorContext(ctx).name();
 	}

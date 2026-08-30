@@ -9,6 +9,16 @@ use parking_lot::Mutex;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
+/// Propagation fields for work started by the active actor invocation.
+#[derive(Clone, Debug)]
+pub struct ActorInvocationTraceContext {
+	pub ray_id: String,
+	pub trace_id: String,
+	pub span_id: String,
+	pub traceparent: String,
+	pub tracestate: Option<String>,
+}
+
 /// Telemetry shared by the automatic spans created during one actor invocation.
 ///
 /// The context crosses foreign-runtime boundaries explicitly. It does not rely
@@ -71,6 +81,31 @@ impl ActorInvocationTelemetry {
 		if let Some(error_type) = error_type.as_deref() {
 			span.record("error.type", error_type);
 		}
+	}
+
+	/// Returns the active invocation context for outbound calls and correlated logs.
+	pub fn trace_context(&self) -> Option<ActorInvocationTraceContext> {
+		let span = self.span.lock().as_ref()?.clone();
+		let context = span.context();
+		let context_span = context.span();
+		let span_context = context_span.span_context();
+		if !span_context.is_valid() {
+			return None;
+		}
+		let tracestate = span_context.trace_state().header();
+
+		Some(ActorInvocationTraceContext {
+			ray_id: self.ray_id.clone(),
+			trace_id: span_context.trace_id().to_string(),
+			span_id: span_context.span_id().to_string(),
+			traceparent: format!(
+				"00-{}-{}-{:02x}",
+				span_context.trace_id(),
+				span_context.span_id(),
+				span_context.trace_flags().to_u8(),
+			),
+			tracestate: (!tracestate.is_empty()).then_some(tracestate),
+		})
 	}
 
 	/// Records one safe runtime operation beneath this invocation.

@@ -3,6 +3,9 @@ import type { ActorSpecifier } from "@/actor/errors";
 import {
 	HEADER_CONN_PARAMS,
 	HEADER_ENCODING,
+	HEADER_RIVETKIT_RAY_ID,
+	HEADER_TRACEPARENT,
+	HEADER_TRACESTATE,
 } from "@/common/actor-router-consts";
 import type * as protocol from "@/common/client-protocol";
 import {
@@ -23,6 +26,7 @@ import { AsyncMutex } from "@/common/database/shared";
 import type { Encoding, JsonCompatValue } from "@/common/encoding";
 import { deconstructError } from "@/common/utils";
 import type { EngineControlClient } from "@/engine-client/driver";
+import type { RuntimeActorInvocationTraceContext } from "@/registry/runtime";
 import {
 	decodeCborCompat,
 	deserializeWithEncoding,
@@ -80,6 +84,9 @@ export class ActorHandleRaw {
 	#resolvedActorId?: string;
 	#resolvingActorId?: Promise<string>;
 	#queueSendMutex = new AsyncMutex();
+	#invocationTraceContext?: () =>
+		| RuntimeActorInvocationTraceContext
+		| undefined;
 
 	/**
 	 * Do not call this directly.
@@ -96,6 +103,9 @@ export class ActorHandleRaw {
 		encoding: Encoding,
 		actorResolutionState: ActorResolutionState,
 		gatewayOptions: ActorGatewayOptions = {},
+		invocationTraceContext?: () =>
+			| RuntimeActorInvocationTraceContext
+			| undefined,
 	) {
 		this.#client = client;
 		this.#driver = driver;
@@ -104,6 +114,7 @@ export class ActorHandleRaw {
 		this.#gatewayOptions = gatewayOptions;
 		this.#params = params;
 		this.#getParams = getParams;
+		this.#invocationTraceContext = invocationTraceContext;
 	}
 
 	async #resolveConnectionParams(): Promise<unknown> {
@@ -303,6 +314,7 @@ export class ActorHandleRaw {
 					name: opts.name,
 					encoding: this.#encoding,
 				});
+				const traceContext = this.#invocationTraceContext?.();
 				const output = await sendHttpRequest<
 					protocol.HttpActionRequest,
 					protocol.HttpActionResponse,
@@ -315,6 +327,20 @@ export class ActorHandleRaw {
 					method: "POST",
 					headers: {
 						[HEADER_ENCODING]: this.#encoding,
+						...(traceContext
+							? {
+									[HEADER_RIVETKIT_RAY_ID]:
+										traceContext.rayId,
+									[HEADER_TRACEPARENT]:
+										traceContext.traceparent,
+									...(traceContext.tracestate
+										? {
+												[HEADER_TRACESTATE]:
+													traceContext.tracestate,
+											}
+										: {}),
+								}
+							: {}),
 						...(this.#params !== undefined
 							? {
 									[HEADER_CONN_PARAMS]: JSON.stringify(

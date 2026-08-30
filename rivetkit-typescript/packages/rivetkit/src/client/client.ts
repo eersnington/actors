@@ -2,6 +2,7 @@ import type { AnyActorDefinition } from "@/actor/definition";
 import type { ActorQuery } from "@/client/query";
 import type { Encoding } from "@/common/encoding";
 import type { EngineControlClient } from "@/engine-client/driver";
+import type { RuntimeActorInvocationTraceContext } from "@/registry/runtime";
 import type { Registry } from "@/registry";
 import type { ActorActionFunction, ActorGatewayOptions } from "./actor-common";
 import {
@@ -189,6 +190,9 @@ export class ClientRaw {
 	#driver: EngineControlClient;
 	#encodingKind: Encoding;
 	#gatewayOptions: ActorGatewayOptions;
+	#invocationTraceContext?: () =>
+		| RuntimeActorInvocationTraceContext
+		| undefined;
 
 	/**
 	 * Creates an instance of Client.
@@ -197,11 +201,15 @@ export class ClientRaw {
 		driver: EngineControlClient,
 		encoding: Encoding | undefined,
 		gatewayOptions: ActorGatewayOptions = {},
+		invocationTraceContext?: () =>
+			| RuntimeActorInvocationTraceContext
+			| undefined,
 	) {
 		this.#driver = driver;
 
 		this.#encodingKind = encoding ?? "bare";
 		this.#gatewayOptions = gatewayOptions;
+		this.#invocationTraceContext = invocationTraceContext;
 	}
 
 	/**
@@ -397,6 +405,7 @@ export class ClientRaw {
 			this.#encodingKind,
 			actorQuery,
 			this.#gatewayOptions,
+			this.#invocationTraceContext,
 		);
 	}
 
@@ -455,7 +464,37 @@ export function createClientWithDriver<A extends Registry<any>>(
 	driver: EngineControlClient,
 	config: { encoding?: Encoding; gateway?: ActorGatewayOptions } = {},
 ): Client<A> {
-	const client = new ClientRaw(driver, config.encoding, config.gateway);
+	return createClientWithInvocationContext(driver, config);
+}
+
+/** @internal Used by the actor runtime to propagate its current invocation. */
+export function createActorClientWithDriver<A extends Registry<any>>(
+	driver: EngineControlClient,
+	config: { encoding?: Encoding; gateway?: ActorGatewayOptions },
+	invocationTraceContext: () =>
+		| RuntimeActorInvocationTraceContext
+		| undefined,
+): Client<A> {
+	return createClientWithInvocationContext(
+		driver,
+		config,
+		invocationTraceContext,
+	);
+}
+
+function createClientWithInvocationContext<A extends Registry<any>>(
+	driver: EngineControlClient,
+	config: { encoding?: Encoding; gateway?: ActorGatewayOptions },
+	invocationTraceContext?: () =>
+		| RuntimeActorInvocationTraceContext
+		| undefined,
+): Client<A> {
+	const client = new ClientRaw(
+		driver,
+		config.encoding,
+		config.gateway,
+		invocationTraceContext,
+	);
 
 	// Create proxy for accessing actors by name
 	return new Proxy(client, {

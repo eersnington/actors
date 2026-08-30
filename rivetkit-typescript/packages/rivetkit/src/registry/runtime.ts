@@ -25,6 +25,14 @@ export interface RuntimeActorKeySegment {
 	numberValue?: number;
 }
 
+export interface RuntimeActorInvocationTraceContext {
+	readonly rayId: string;
+	readonly traceId: string;
+	readonly spanId: string;
+	readonly traceparent: string;
+	readonly tracestate?: string;
+}
+
 export interface RuntimeHttpRequest {
 	method: string;
 	uri: string;
@@ -514,6 +522,9 @@ export interface CoreRuntime {
 		writes: RuntimeWorkflowKvWrite[],
 	): Promise<void>;
 	actorId(ctx: ActorContextHandle): string;
+	actorInvocationTraceContext?(
+		ctx: ActorContextHandle,
+	): RuntimeActorInvocationTraceContext | undefined;
 	actorName(ctx: ActorContextHandle): string;
 	actorKey(ctx: ActorContextHandle): RuntimeActorKeySegment[];
 	actorRegion(ctx: ActorContextHandle): string;
