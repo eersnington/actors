@@ -22,8 +22,7 @@ pub(crate) fn initialize_if_configured() -> Result<Option<SdkTracer>, openteleme
 	let resource = Resource::builder()
 		.with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
 		.build();
-	// OTEL_TRACES_SAMPLER is not configured by this minimal integration yet;
-	// the SDK default remains parent-based always-on sampling.
+	// The SDK reads standard OTEL_TRACES_SAMPLER configuration here.
 	let provider = SdkTracerProvider::builder()
 		.with_resource(resource)
 		.with_batch_exporter(exporter)

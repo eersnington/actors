@@ -611,6 +611,7 @@ describe.sequential("native NAPI runtime integration", () => {
 				RIVET_LOG_LEVEL: "info",
 				OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `http://127.0.0.1:${collectorPort}/v1/traces`,
 				OTEL_SERVICE_NAME: "rivetkit-actor-call-integration",
+				OTEL_TRACES_SAMPLER: "always_on",
 			},
 			stdio: ["ignore", "pipe", "pipe"],
 		});
@@ -756,5 +757,81 @@ describe.sequential("native NAPI runtime integration", () => {
 			.filter((span) => span.name === "rivet.actor.connection.disconnect")
 			.map((span) => span.attributes.get("rivet.connection.id"));
 		expect(disconnectedIds.some((id) => id && connectedIds.has(id))).toBe(true);
+	}, 120_000);
+
+	test("keeps actor actions working when standard sampling disables trace recording", async () => {
+		const poolName = "default";
+		const [guardPort, apiPeerPort, metricsPort, collectorPort] =
+			await Promise.all(
+				Array.from({ length: 4 }, () => getPort({ host: "127.0.0.1" })),
+			);
+		const endpoint = `http://127.0.0.1:${guardPort}`;
+		engineStorage = await mkdtemp(join(tmpdir(), "rivetkit-otel-sampling-"));
+
+		engine = spawn(ENGINE_PATH, ["start"], {
+			env: {
+				...process.env,
+				RIVET__GUARD__HOST: "127.0.0.1",
+				RIVET__GUARD__PORT: String(guardPort),
+				RIVET__API_PEER__HOST: "127.0.0.1",
+				RIVET__API_PEER__PORT: String(apiPeerPort),
+				RIVET__METRICS__HOST: "127.0.0.1",
+				RIVET__METRICS__PORT: String(metricsPort),
+				RIVET__FILE_SYSTEM__PATH: engineStorage,
+			},
+			stdio: "ignore",
+		});
+		await waitForHealth(engine, endpoint, 30_000);
+
+		let exportRequests = 0;
+		collector = createServer((_request, response) => {
+			exportRequests += 1;
+			response.writeHead(200).end();
+		});
+		await new Promise<void>((resolve) =>
+			collector?.listen(collectorPort, "127.0.0.1", resolve),
+		);
+
+		runtimeLogs = { stdout: "", stderr: "" };
+		runtime = spawn(process.execPath, ["--import", "tsx", FIXTURE_PATH], {
+			cwd: dirname(TEST_DIR),
+			env: {
+				...process.env,
+				RIVET_TOKEN: TOKEN,
+				RIVET_NAMESPACE: NAMESPACE,
+				RIVETKIT_TEST_ENDPOINT: endpoint,
+				RIVETKIT_TEST_POOL_NAME: poolName,
+				OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `http://127.0.0.1:${collectorPort}/v1/traces`,
+				OTEL_TRACES_SAMPLER: "always_off",
+			},
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		runtime.stdout?.on("data", (chunk) => {
+			runtimeLogs.stdout += chunk.toString();
+		});
+		runtime.stderr?.on("data", (chunk) => {
+			runtimeLogs.stderr += chunk.toString();
+		});
+
+		await upsertNormalRunnerConfig(runtime, endpoint, poolName);
+		await waitForEnvoy(runtime, endpoint, poolName, 30_000);
+		const client = createClient<any>({
+			endpoint,
+			token: TOKEN,
+			namespace: NAMESPACE,
+			poolName,
+			disableMetadataLookup: true,
+		}) as any;
+		const handle = await waitForActorReady(
+			() => client.correlationSource.create([crypto.randomUUID()]),
+			30_000,
+		);
+		const token = crypto.randomUUID();
+		expect(await handle.relay(token)).toBe(token);
+
+		await client.dispose();
+		await stopRuntime(runtime);
+		runtime = undefined;
+		expect(exportRequests).toBe(0);
 	}, 120_000);
 });
