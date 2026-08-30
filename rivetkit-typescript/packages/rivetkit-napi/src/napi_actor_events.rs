@@ -11,6 +11,7 @@ use rivetkit_core::{
 	ActorContext as CoreActorContext, ActorEvent, ActorEvents, ActorLifecycle, ActorStart,
 	QueueSendResult, QueueSendStatus, Reply, SerializeStateReason, StateDelta,
 };
+use rivetkit_core::telemetry::ActorCallbackTelemetry;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
@@ -119,17 +120,23 @@ pub(crate) async fn run_adapter_loop(
 	}));
 
 	let mut tasks = JoinSet::new();
-	let run_handler = match run_preamble(
+	let mut startup_telemetry =
+		ActorCallbackTelemetry::start(&core_ctx, "lifecycle", "start", None, None);
+	let preamble_result = run_preamble(
 		&bindings,
 		config.as_ref(),
 		&ctx,
+		startup_telemetry.as_ref(),
 		input.as_deref(),
 		is_new,
 		snapshot,
 		hibernated,
 	)
-	.await
-	{
+	.await;
+	if let Some(telemetry) = &mut startup_telemetry {
+		telemetry.finish(&preamble_result);
+	}
+	let run_handler = match preamble_result {
 		Ok(run_handler) => {
 			if let Some(reply) = startup_ready {
 				let _ = reply.send(Ok(()));
@@ -215,6 +222,7 @@ async fn run_preamble(
 	bindings: &CallbackBindings,
 	config: &AdapterConfig,
 	ctx: &ActorContext,
+	startup_telemetry: Option<&ActorCallbackTelemetry>,
 	input: Option<&[u8]>,
 	is_new: bool,
 	snapshot: Option<Vec<u8>>,
@@ -225,29 +233,44 @@ async fn run_preamble(
 	// Run database migrations before any user lifecycle hook so `c.db` is
 	// usable from createState, onCreate, and createVars.
 	if let Some(callback) = &bindings.on_migrate {
-		with_timeout(
-			"onMigrate",
-			config.on_migrate_timeout,
-			call_on_migrate(callback, ctx, is_new),
+		trace_lifecycle_callback(
+			ctx,
+			"on_migrate",
+			startup_telemetry,
+			with_timeout(
+				"onMigrate",
+				config.on_migrate_timeout,
+				call_on_migrate(callback, ctx, is_new),
+			),
 		)
 		.await?;
 	}
 
 	if is_new {
 		if let Some(callback) = &bindings.create_state {
-			let bytes = with_timeout(
-				"createState",
-				config.create_state_timeout,
-				call_create_state(callback, ctx, input),
+			let bytes = trace_lifecycle_callback(
+				ctx,
+				"create_state",
+				startup_telemetry,
+				with_timeout(
+					"createState",
+					config.create_state_timeout,
+					call_create_state(callback, ctx, input),
+				),
 			)
 			.await?;
 			ctx.set_state_initial(bytes)?;
 		}
 		if let Some(callback) = &bindings.on_create {
-			with_timeout(
-				"onCreate",
-				config.on_create_timeout,
-				call_on_create(callback, ctx, input),
+			trace_lifecycle_callback(
+				ctx,
+				"on_create",
+				startup_telemetry,
+				with_timeout(
+					"onCreate",
+					config.on_create_timeout,
+					call_on_create(callback, ctx, input),
+				),
 			)
 			.await?;
 		}
@@ -255,10 +278,15 @@ async fn run_preamble(
 	} else if let Some(snapshot) = snapshot {
 		ctx.set_state_initial(snapshot)?;
 	} else if let Some(callback) = &bindings.create_state {
-		let bytes = with_timeout(
-			"createState",
-			config.create_state_timeout,
-			call_create_state(callback, ctx, input),
+		let bytes = trace_lifecycle_callback(
+			ctx,
+			"create_state",
+			startup_telemetry,
+			with_timeout(
+				"createState",
+				config.create_state_timeout,
+				call_create_state(callback, ctx, input),
+			),
 		)
 		.await?;
 		ctx.set_state_initial(bytes)?;
@@ -278,28 +306,43 @@ async fn run_preamble(
 	}
 
 	if let Some(callback) = &bindings.create_vars {
-		with_timeout(
-			"createVars",
-			config.create_vars_timeout,
-			call_create_vars(callback, ctx),
+		trace_lifecycle_callback(
+			ctx,
+			"create_vars",
+			startup_telemetry,
+			with_timeout(
+				"createVars",
+				config.create_vars_timeout,
+				call_create_vars(callback, ctx),
+			),
 		)
 		.await?;
 	}
 
 	if let Some(callback) = &bindings.on_wake {
-		with_timeout(
-			"onWake",
-			config.on_wake_timeout,
-			call_on_wake(callback, ctx),
+		trace_lifecycle_callback(
+			ctx,
+			"on_wake",
+			startup_telemetry,
+			with_timeout(
+				"onWake",
+				config.on_wake_timeout,
+				call_on_wake(callback, ctx),
+			),
 		)
 		.await?;
 	}
 
 	if let Some(callback) = &bindings.on_before_actor_start {
-		with_timeout(
-			"onBeforeActorStart",
-			config.on_before_actor_start_timeout,
-			call_on_before_actor_start(callback, ctx),
+		trace_lifecycle_callback(
+			ctx,
+			"on_before_actor_start",
+			startup_telemetry,
+			with_timeout(
+				"onBeforeActorStart",
+				config.on_before_actor_start_timeout,
+				call_on_before_actor_start(callback, ctx),
+			),
 		)
 		.await?;
 	}
@@ -310,6 +353,23 @@ async fn run_preamble(
 	}
 
 	Ok(run_handler)
+}
+
+async fn trace_lifecycle_callback<T>(
+	ctx: &ActorContext,
+	operation: &'static str,
+	parent: Option<&ActorCallbackTelemetry>,
+	future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+	ActorCallbackTelemetry::trace(
+		ctx.inner(),
+		"lifecycle",
+		operation,
+		parent,
+		None,
+		future,
+	)
+	.await
 }
 
 fn normalize_startup_snapshot(
@@ -1084,12 +1144,17 @@ async fn call_on_sleep(
 	callback: &crate::actor_factory::CallbackTsfn<LifecyclePayload>,
 	ctx: &ActorContext,
 ) -> Result<()> {
-	call_void(
-		"onSleep",
-		callback,
-		LifecyclePayload {
-			ctx: ctx.inner().clone(),
-		},
+	trace_lifecycle_callback(
+		ctx,
+		"on_sleep",
+		None,
+		call_void(
+			"onSleep",
+			callback,
+			LifecyclePayload {
+				ctx: ctx.inner().clone(),
+			},
+		),
 	)
 	.await
 }
@@ -1098,12 +1163,17 @@ async fn call_on_destroy(
 	callback: &crate::actor_factory::CallbackTsfn<LifecyclePayload>,
 	ctx: &ActorContext,
 ) -> Result<()> {
-	call_void(
-		"onDestroy",
-		callback,
-		LifecyclePayload {
-			ctx: ctx.inner().clone(),
-		},
+	trace_lifecycle_callback(
+		ctx,
+		"on_destroy",
+		None,
+		call_void(
+			"onDestroy",
+			callback,
+			LifecyclePayload {
+				ctx: ctx.inner().clone(),
+			},
+		),
 	)
 	.await
 }
@@ -1203,15 +1273,25 @@ async fn call_on_websocket(
 	ws: rivetkit_core::WebSocket,
 	request: Option<rivetkit_core::Request>,
 ) -> Result<()> {
-	call_void(
-		"onWebSocket",
-		callback,
-		WebSocketPayload {
-			ctx: ctx.inner().clone(),
-			conn,
-			ws,
-			request,
-		},
+	let telemetry = ActorCallbackTelemetry::start_connection(
+		ctx.inner(),
+		"websocket",
+		"open",
+		request.as_ref(),
+		conn.id(),
+	);
+	ActorCallbackTelemetry::trace_started(
+		telemetry,
+		call_void(
+			"onWebSocket",
+			callback,
+			WebSocketPayload {
+				ctx: ctx.inner().clone(),
+				conn,
+				ws,
+				request,
+			},
+		),
 	)
 	.await
 }
@@ -1308,14 +1388,24 @@ async fn call_on_connect(
 	conn: rivetkit_core::ConnHandle,
 	request: Option<rivetkit_core::Request>,
 ) -> Result<()> {
-	call_void(
-		"onConnect",
-		callback,
-		ConnectionPayload {
-			ctx: ctx.inner().clone(),
-			conn,
-			request,
-		},
+	let telemetry = ActorCallbackTelemetry::start_connection(
+		ctx.inner(),
+		"connection",
+		"connect",
+		request.as_ref(),
+		conn.id(),
+	);
+	ActorCallbackTelemetry::trace_started(
+		telemetry,
+		call_void(
+			"onConnect",
+			callback,
+			ConnectionPayload {
+				ctx: ctx.inner().clone(),
+				conn,
+				request,
+			},
+		),
 	)
 	.await
 }
@@ -1325,8 +1415,16 @@ async fn call_on_disconnect_final(
 	ctx: &ActorContext,
 	conn: rivetkit_core::ConnHandle,
 ) -> Result<()> {
-	ctx.inner()
-		.with_disconnect_callback(|| async {
+	let telemetry = ActorCallbackTelemetry::start_connection(
+		ctx.inner(),
+		"connection",
+		"disconnect",
+		None,
+		conn.id(),
+	);
+	ActorCallbackTelemetry::trace_started(
+		telemetry,
+		ctx.inner().with_disconnect_callback(|| async {
 			call_void(
 				"onDisconnect",
 				callback,
@@ -1337,7 +1435,8 @@ async fn call_on_disconnect_final(
 				},
 			)
 			.await
-		})
+		}),
+	)
 		.await
 }
 

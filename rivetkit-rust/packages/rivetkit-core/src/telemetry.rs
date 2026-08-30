@@ -9,6 +9,8 @@ use parking_lot::Mutex;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
+use crate::{ActorContext, Request, format_actor_key};
+
 /// Propagation fields for work started by the active actor invocation.
 #[derive(Clone, Debug)]
 pub struct ActorInvocationTraceContext {
@@ -25,6 +27,170 @@ pub struct DurableTraceContext {
 	pub ray_id: String,
 	pub traceparent: String,
 	pub tracestate: Option<String>,
+}
+
+/// Telemetry for one bounded lifecycle or connection callback.
+#[derive(Debug)]
+pub struct ActorCallbackTelemetry {
+	span: Option<tracing::Span>,
+	ray_id: String,
+}
+
+impl ActorCallbackTelemetry {
+	pub fn start(
+		ctx: &ActorContext,
+		system: &'static str,
+		operation: &'static str,
+		parent: Option<&Self>,
+		request: Option<&Request>,
+	) -> Option<Self> {
+		Self::start_with_connection(ctx, system, operation, parent, request, None)
+	}
+
+	pub fn start_connection(
+		ctx: &ActorContext,
+		system: &'static str,
+		operation: &'static str,
+		request: Option<&Request>,
+		connection_id: &str,
+	) -> Option<Self> {
+		Self::start_with_connection(
+			ctx,
+			system,
+			operation,
+			None,
+			request,
+			Some(connection_id),
+		)
+	}
+
+	fn start_with_connection(
+		ctx: &ActorContext,
+		system: &'static str,
+		operation: &'static str,
+		parent: Option<&Self>,
+		request: Option<&Request>,
+		connection_id: Option<&str>,
+	) -> Option<Self> {
+		if !tracing::enabled!(target: "rivetkit::telemetry", tracing::Level::INFO) {
+			return None;
+		}
+
+		let request_ray_id = request.and_then(|request| invocation_ray_id(request.headers()));
+		let ray_id = parent
+			.map(|parent| parent.ray_id.clone())
+			.or(request_ray_id)
+			.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+		let span = match parent.and_then(|parent| parent.span.as_ref()) {
+			Some(parent_span) => tracing::info_span!(
+				target: "rivetkit::telemetry",
+				parent: parent_span,
+				"rivet.actor.callback",
+				otel.name = %format!("rivet.actor.{system}.{operation}"),
+				otel.kind = "internal",
+				rivet.callback.name = operation,
+				rivet.actor.id = %ctx.actor_id(),
+				rivet.actor.name = %ctx.name(),
+				rivet.actor.key = %format_actor_key(ctx.key()),
+				rivet.ray.id = %ray_id,
+				rivet.connection.id = tracing::field::Empty,
+				otel.status_code = tracing::field::Empty,
+				error.type = tracing::field::Empty,
+			),
+			None => tracing::info_span!(
+				target: "rivetkit::telemetry",
+				parent: None,
+				"rivet.actor.callback",
+				otel.name = %format!("rivet.actor.{system}.{operation}"),
+				otel.kind = "internal",
+				rivet.callback.name = operation,
+				rivet.actor.id = %ctx.actor_id(),
+				rivet.actor.name = %ctx.name(),
+				rivet.actor.key = %format_actor_key(ctx.key()),
+				rivet.ray.id = %ray_id,
+				rivet.connection.id = tracing::field::Empty,
+				otel.status_code = tracing::field::Empty,
+				error.type = tracing::field::Empty,
+			),
+		};
+		if let Some(connection_id) = connection_id {
+			span.record("rivet.connection.id", connection_id);
+		}
+
+		if parent.is_none() {
+			let traceparent = request.and_then(|request| header(request, "traceparent"));
+			let tracestate = request.and_then(|request| header(request, "tracestate"));
+			set_remote_parent(&span, traceparent, tracestate);
+		}
+
+		Some(Self {
+			span: Some(span),
+			ray_id,
+		})
+	}
+
+	pub async fn trace<T>(
+		ctx: &ActorContext,
+		system: &'static str,
+		operation: &'static str,
+		parent: Option<&Self>,
+		request: Option<&Request>,
+		future: impl Future<Output = anyhow::Result<T>>,
+	) -> anyhow::Result<T> {
+		Self::trace_started(
+			Self::start(ctx, system, operation, parent, request),
+			future,
+		)
+		.await
+	}
+
+	pub async fn trace_started<T>(
+		telemetry: Option<Self>,
+		future: impl Future<Output = anyhow::Result<T>>,
+	) -> anyhow::Result<T> {
+		let Some(mut telemetry) = telemetry else {
+			return future.await;
+		};
+		let span = telemetry.span.as_ref().cloned().expect("callback span");
+		let result = future.instrument(span).await;
+		telemetry.finish(&result);
+		result
+	}
+
+	pub fn finish<T>(&mut self, result: &anyhow::Result<T>) {
+		let Some(span) = self.span.take() else {
+			return;
+		};
+		span.record(
+			"otel.status_code",
+			if result.is_ok() { "OK" } else { "ERROR" },
+		);
+		if let Err(error) = result {
+			let structured = rivet_error::RivetError::extract(error);
+			span.record(
+				"error.type",
+				format!("{}.{}", structured.group(), structured.code()),
+			);
+		}
+	}
+}
+
+fn header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+	request.headers().get(name)?.to_str().ok()
+}
+
+fn invocation_ray_id(headers: &http::HeaderMap) -> Option<String> {
+	["x-rivetkit-ray-id", "x-rivet-ray-id"]
+		.into_iter()
+		.filter_map(|name| headers.get(name)?.to_str().ok())
+		.find(|value| {
+			!value.is_empty()
+				&& value.len() <= 128
+				&& value
+					.bytes()
+					.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+		})
+		.map(str::to_owned)
 }
 
 impl From<ActorInvocationTraceContext> for DurableTraceContext {

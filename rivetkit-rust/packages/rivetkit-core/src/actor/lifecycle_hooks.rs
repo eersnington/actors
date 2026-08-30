@@ -14,9 +14,9 @@ impl<T> Reply<T> {
 	#[doc(hidden)]
 	pub fn with_invocation_telemetry(
 		mut self,
-		telemetry: Option<crate::telemetry::ActorInvocationTelemetry>,
+		telemetry: crate::telemetry::ActorInvocationTelemetry,
 	) -> Self {
-		self.invocation_telemetry = telemetry;
+		self.invocation_telemetry = Some(telemetry);
 		self
 	}
 
