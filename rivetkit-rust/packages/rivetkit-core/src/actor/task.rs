@@ -908,6 +908,7 @@ impl ActorTask {
 					traceparent.as_deref(),
 					tracestate.as_deref(),
 				);
+				let invocation_started_at = Instant::now();
 				tracing::info!(
 					actor_id = %self.ctx.actor_id(),
 					action_name = %name,
@@ -938,11 +939,18 @@ impl ActorTask {
 						let actor_id = self.ctx.actor_id().to_owned();
 						let ctx = self.ctx.clone();
 						let invocation_telemetry = telemetry.clone();
+						let invocation_metrics = self.ctx.metrics().clone();
 						self.ctx.spawn_work(ActorWorkKind::Action, async move {
 							match tracked_reply_rx.await {
 								Ok(result) => {
 									let result =
 										result.map_err(|error| ctx.attach_actor_to_error(error));
+									invocation_metrics.record_invocation(
+										&action_name_for_log,
+										"action",
+										if result.is_ok() { "ok" } else { "error" },
+										invocation_started_at.elapsed(),
+									);
 									if let Some(telemetry) = &invocation_telemetry {
 										let error_type = result.as_ref().err().map(|error| {
 											let structured = rivet_error::RivetError::extract(error);
@@ -962,6 +970,12 @@ impl ActorTask {
 									let _ = reply.send(result);
 								}
 								Err(_) => {
+									invocation_metrics.record_invocation(
+										&action_name_for_log,
+										"action",
+										"error",
+										invocation_started_at.elapsed(),
+									);
 									if let Some(telemetry) = &invocation_telemetry {
 										telemetry.finish(
 											"ERROR",

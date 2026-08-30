@@ -25,6 +25,7 @@ if (process.env.RIVETKIT_TEST_JS_OTEL === "1") {
 }
 
 const textDecoder = new TextDecoder();
+let readPrometheusMetrics: (() => Promise<string>) | undefined;
 const fixtureDir = dirname(fileURLToPath(import.meta.url));
 const repoEngineBinary = resolve(
 	fixtureDir,
@@ -76,6 +77,11 @@ const correlationSource = actor({
 		);
 	},
 	actions: {
+		failInvocation: () => {
+			throw new UserError("expected invocation failure", {
+				code: "expected_failure",
+			});
+		},
 		fetchTraceparent: async (c, token: string) => {
 			c.log.info({
 				msg: "making instrumented outbound request",
@@ -95,6 +101,10 @@ const correlationSource = actor({
 			return token;
 		},
 		getScheduledToken: (c) => c.state.scheduledToken,
+		getPrometheusMetrics: async () => {
+			if (!readPrometheusMetrics) throw new Error("metrics are not ready");
+			return await readPrometheusMetrics();
+		},
 		relay: async (c, token: string) => {
 			c.log.info({
 				msg: "sending correlated actor call",
@@ -235,9 +245,13 @@ const registry = setup({
 	},
 });
 
-const { registry: nativeRegistry, serveConfig } = await buildNativeRegistry(
-	registry.parseConfig(),
-);
+const { runtime, registry: nativeRegistry, serveConfig } =
+	await buildNativeRegistry(registry.parseConfig());
+readPrometheusMetrics = async () => {
+	if (!runtime.registryMetrics) throw new Error("metrics are not supported");
+	const response = await runtime.registryMetrics(nativeRegistry);
+	return textDecoder.decode(response.body);
+};
 serveConfig.engineBinaryPath = resolveEngineBinaryPath();
 
 await nativeRegistry.serve(serveConfig);

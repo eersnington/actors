@@ -693,6 +693,27 @@ describe.sequential("native NAPI runtime integration", () => {
 			await new Promise((resolve) => setTimeout(resolve, 50));
 		}
 		expect(completedScheduledToken).toBe(scheduledToken);
+		await expect(handle.failInvocation()).rejects.toMatchObject({
+			group: "user",
+			code: "expected_failure",
+		});
+		const metrics = (await handle.getPrometheusMetrics()) as string;
+		const invocationMetrics = metrics
+			.split("\n")
+			.filter((line) => line.includes("actor_invocation"))
+			.join("\n");
+		expect(invocationMetrics).toContain(
+			'rivet_rivetkit_actor_invocations_total{action_name="relay",actor_name="correlationSource",invocation_type="action",status="ok"} 2',
+		);
+		expect(invocationMetrics).toContain(
+			'rivet_rivetkit_actor_invocations_total{action_name="failInvocation",actor_name="correlationSource",invocation_type="action",status="error"} 1',
+		);
+		expect(invocationMetrics).toContain(
+			'rivet_rivetkit_actor_invocations_total{action_name="completeScheduled",actor_name="correlationSource",invocation_type="scheduled",status="ok"} 1',
+		);
+		expect(invocationMetrics).toContain(
+			'rivet_rivetkit_actor_invocation_duration_seconds_count{action_name="completeScheduled",actor_name="correlationSource",invocation_type="scheduled",status="ok"} 1',
+		);
 		await waitFor(
 			() =>
 				tokens.every(

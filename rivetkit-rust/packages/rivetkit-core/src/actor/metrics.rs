@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -15,6 +15,8 @@ use crate::time::Instant;
 const ACTOR_LABELS: &[&str] = &["actor_name"];
 const INBOX_LABELS: &[&str] = &["actor_name", "inbox"];
 const USER_TASK_LABELS: &[&str] = &["actor_name", "kind"];
+const INVOCATION_LABELS: &[&str] =
+	&["actor_name", "action_name", "invocation_type", "status"];
 const WORK_LABELS: &[&str] = &["actor_name", "kind"];
 const SHUTDOWN_LABELS: &[&str] = &["actor_name", "reason"];
 const STATE_MUTATION_LABELS: &[&str] = &["actor_name", "reason"];
@@ -124,6 +126,7 @@ pub(crate) struct StartupTimer {
 #[derive(Debug)]
 struct ActorMetricInner {
 	labels: ActorMetricLabels,
+	action_names: BTreeSet<String>,
 	state: Mutex<ActorMetricState>,
 	active: AtomicBool,
 	startup_is_new: AtomicU8,
@@ -170,6 +173,8 @@ struct ActorMetricCollectors {
 	inbox_depth: IntGaugeVec,
 	user_tasks_active: IntGaugeVec,
 	user_task_duration_seconds: HistogramVec,
+	invocations_total: IntCounterVec,
+	invocation_duration_seconds: HistogramVec,
 	http_requests_active: IntGaugeVec,
 	keep_awake_active: IntGaugeVec,
 	shutdown_tasks_active: IntGaugeVec,
@@ -340,6 +345,22 @@ impl ActorMetricCollectors {
 			USER_TASK_LABELS,
 		)
 		.expect("create actor_user_task_duration_seconds histogram");
+		let invocations_total = IntCounterVec::new(
+			Opts::new(
+				"rivetkit_actor_invocations_total",
+				"total completed actor invocations",
+			),
+			INVOCATION_LABELS,
+		)
+		.expect("create actor_invocations_total counter");
+		let invocation_duration_seconds = HistogramVec::new(
+			HistogramOpts::new(
+				"rivetkit_actor_invocation_duration_seconds",
+				"actor invocation duration in seconds",
+			),
+			INVOCATION_LABELS,
+		)
+		.expect("create actor_invocation_duration_seconds histogram");
 		let http_requests_active = IntGaugeVec::new(
 			Opts::new(
 				"rivetkit_actor_http_requests_active",
@@ -656,6 +677,11 @@ impl ActorMetricCollectors {
 		register_metric(&rivet_metrics::REGISTRY, inbox_depth.clone());
 		register_metric(&rivet_metrics::REGISTRY, user_tasks_active.clone());
 		register_metric(&rivet_metrics::REGISTRY, user_task_duration_seconds.clone());
+		register_metric(&rivet_metrics::REGISTRY, invocations_total.clone());
+		register_metric(
+			&rivet_metrics::REGISTRY,
+			invocation_duration_seconds.clone(),
+		);
 		register_metric(&rivet_metrics::REGISTRY, http_requests_active.clone());
 		register_metric(&rivet_metrics::REGISTRY, keep_awake_active.clone());
 		register_metric(&rivet_metrics::REGISTRY, shutdown_tasks_active.clone());
@@ -770,6 +796,8 @@ impl ActorMetricCollectors {
 			inbox_depth,
 			user_tasks_active,
 			user_task_duration_seconds,
+			invocations_total,
+			invocation_duration_seconds,
 			http_requests_active,
 			keep_awake_active,
 			shutdown_tasks_active,
@@ -832,7 +860,10 @@ impl ActorMetricCollectors {
 }
 
 impl ActorMetrics {
-	pub(crate) fn new(actor_name: impl Into<String>) -> Self {
+	pub(crate) fn new(
+		actor_name: impl Into<String>,
+		action_names: impl IntoIterator<Item = String>,
+	) -> Self {
 		let labels = ActorMetricLabels {
 			actor_name: actor_name.into(),
 		};
@@ -848,6 +879,7 @@ impl ActorMetrics {
 		Self {
 			inner: Arc::new(ActorMetricInner {
 				labels,
+				action_names: action_names.into_iter().collect(),
 				state: Mutex::new(ActorMetricState::default()),
 				active: AtomicBool::new(true),
 				startup_is_new: AtomicU8::new(STARTUP_KIND_UNKNOWN),
@@ -1098,6 +1130,30 @@ impl ActorMetrics {
 			.observe(duration.as_secs_f64());
 	}
 
+	pub(crate) fn record_invocation(
+		&self,
+		action_name: &str,
+		invocation_type: &'static str,
+		status: &'static str,
+		duration: Duration,
+	) {
+		let actor_labels = self.actor_labels();
+		let action_name = if self.inner.action_names.contains(action_name) {
+			action_name
+		} else {
+			"unknown"
+		};
+		let labels = [actor_labels[0], action_name, invocation_type, status];
+		METRICS
+			.invocations_total
+			.with_label_values(&labels)
+			.inc();
+		METRICS
+			.invocation_duration_seconds
+			.with_label_values(&labels)
+			.observe(duration.as_secs_f64());
+	}
+
 	pub(crate) fn set_http_requests_active(&self, count: usize) {
 		let labels = self.actor_labels();
 		let mut state = self.inner.state.lock();
@@ -1278,7 +1334,7 @@ impl ActorMetricInner {
 
 impl Default for ActorMetrics {
 	fn default() -> Self {
-		Self::new("")
+		Self::new("", std::iter::empty())
 	}
 }
 
