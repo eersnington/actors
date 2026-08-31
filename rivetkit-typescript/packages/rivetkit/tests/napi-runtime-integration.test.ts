@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import getPort from "get-port";
 import { afterEach, describe, expect, test } from "vitest";
 import { createClient } from "../src/client/mod";
+import type { NapiRuntimeFixtureRegistry } from "./fixtures/napi-runtime-server";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_PATH = join(TEST_DIR, "fixtures", "napi-runtime-server.ts");
@@ -108,6 +109,47 @@ async function waitForHealth(
 	throw new Error(
 		`timed out waiting for native runtime health:\n${childOutput(child)}`,
 	);
+}
+
+async function startEngine(
+	storagePrefix: string,
+): Promise<{ child: ChildProcess; endpoint: string; storage: string }> {
+	const [guardPort, apiPeerPort, metricsPort] = await Promise.all(
+		Array.from({ length: 3 }, () => getPort({ host: "127.0.0.1" })),
+	);
+	const endpoint = `http://127.0.0.1:${guardPort}`;
+	const storage = await mkdtemp(join(tmpdir(), storagePrefix));
+	const child = spawn(ENGINE_PATH, ["start"], {
+		env: {
+			...process.env,
+			RIVET__GUARD__HOST: "127.0.0.1",
+			RIVET__GUARD__PORT: String(guardPort),
+			RIVET__API_PEER__HOST: "127.0.0.1",
+			RIVET__API_PEER__PORT: String(apiPeerPort),
+			RIVET__METRICS__HOST: "127.0.0.1",
+			RIVET__METRICS__PORT: String(metricsPort),
+			RIVET__FILE_SYSTEM__PATH: storage,
+		},
+		stdio: "ignore",
+	});
+	await waitForHealth(child, endpoint, 30_000);
+	return { child, endpoint, storage };
+}
+
+function spawnFixture(env: NodeJS.ProcessEnv): ChildProcess {
+	runtimeLogs = { stdout: "", stderr: "" };
+	const child = spawn(process.execPath, ["--import", "tsx", FIXTURE_PATH], {
+		cwd: dirname(TEST_DIR),
+		env: { ...process.env, ...env },
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	child.stdout?.on("data", (chunk) => {
+		runtimeLogs.stdout += chunk.toString();
+	});
+	child.stderr?.on("data", (chunk) => {
+		runtimeLogs.stderr += chunk.toString();
+	});
+	return child;
 }
 
 async function waitForActorSleep(
@@ -428,36 +470,24 @@ describe.sequential("native NAPI runtime integration", () => {
 		const poolName = "default";
 		const port = await getPort({ host: "127.0.0.1" });
 		const endpoint = `http://127.0.0.1:${port}`;
-		runtimeLogs = { stdout: "", stderr: "" };
-		runtime = spawn(process.execPath, ["--import", "tsx", FIXTURE_PATH], {
-			cwd: dirname(TEST_DIR),
-			env: {
-				...process.env,
-				RIVET_TOKEN: TOKEN,
-				RIVET_NAMESPACE: NAMESPACE,
-				RIVETKIT_TEST_ENDPOINT: endpoint,
-				RIVETKIT_TEST_POOL_NAME: poolName,
-			},
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-		runtime.stdout?.on("data", (chunk) => {
-			runtimeLogs.stdout += chunk.toString();
-		});
-		runtime.stderr?.on("data", (chunk) => {
-			runtimeLogs.stderr += chunk.toString();
+		runtime = spawnFixture({
+			RIVET_TOKEN: TOKEN,
+			RIVET_NAMESPACE: NAMESPACE,
+			RIVETKIT_TEST_ENDPOINT: endpoint,
+			RIVETKIT_TEST_POOL_NAME: poolName,
 		});
 
 		await waitForHealth(runtime, endpoint, 90_000);
 		await upsertNormalRunnerConfig(runtime, endpoint, poolName);
 		await waitForEnvoy(runtime, endpoint, poolName, 30_000);
 
-		const client = createClient<any>({
+		const client = createClient<NapiRuntimeFixtureRegistry>({
 			endpoint,
 			token: TOKEN,
 			namespace: NAMESPACE,
 			poolName,
 			disableMetadataLookup: true,
-		}) as any;
+		});
 
 		const handle = await waitForActorReady(
 			() =>
@@ -559,35 +589,79 @@ describe.sequential("native NAPI runtime integration", () => {
 			code: "internal_error",
 			message: "An internal error occurred",
 		});
+
+		await client.dispose();
+	}, 120_000);
+
+	test("preserves one ray across calls and schedules without trace export", async () => {
+		const poolName = "default";
+		const startedEngine = await startEngine("rivetkit-ray-engine-");
+		engine = startedEngine.child;
+		engineStorage = startedEngine.storage;
+		const endpoint = startedEngine.endpoint;
+		runtime = spawnFixture({
+			RIVET_TOKEN: TOKEN,
+			RIVET_NAMESPACE: NAMESPACE,
+			RIVETKIT_TEST_ENDPOINT: endpoint,
+			RIVETKIT_TEST_POOL_NAME: poolName,
+			RIVET_LOG_LEVEL: "info",
+			OTEL_SDK_DISABLED: "true",
+		});
+
+		await upsertNormalRunnerConfig(runtime, endpoint, poolName);
+		await waitForEnvoy(runtime, endpoint, poolName, 30_000);
+		const client = createClient<NapiRuntimeFixtureRegistry>({
+			endpoint,
+			token: TOKEN,
+			namespace: NAMESPACE,
+			poolName,
+			disableMetadataLookup: true,
+		});
+		const token = crypto.randomUUID();
+		const source = await waitForActorReady(
+			() => client.correlationSource.create([`no-export-${token}`]),
+			30_000,
+		);
+
+		expect(await source.correlateWithoutTracing(token)).toBe(token);
+		await waitFor(
+			() => {
+				const roles = new Set(
+					runtimeLogs.stdout
+						.split("\n")
+						.filter((line) => line.includes(`correlation_token=${token}`))
+						.map((line) => logField(line, "correlation_role")),
+				);
+				return ["source", "target", "scheduled"].every((role) =>
+					roles.has(role),
+				);
+			},
+			10_000,
+			`timed out waiting for ray-correlated logs:\n${runtimeLogs.stdout}`,
+		);
+		const lines = runtimeLogs.stdout
+			.split("\n")
+			.filter((line) => line.includes(`correlation_token=${token}`));
+		const rayIds = lines.map((line) => logField(line, "ray_id"));
+		expect(rayIds.every(Boolean)).toBe(true);
+		expect(new Set(rayIds).size).toBe(1);
 		await client.dispose();
 	}, 120_000);
 
 	test("correlates concurrent actor calls in logs and exported traces", async () => {
 		const poolName = "default";
-		const [guardPort, apiPeerPort, metricsPort, collectorPort] =
-			await Promise.all(
-				Array.from({ length: 4 }, () => getPort({ host: "127.0.0.1" })),
-			);
-		const endpoint = `http://127.0.0.1:${guardPort}`;
-		engineStorage = await mkdtemp(join(tmpdir(), "rivetkit-otel-engine-"));
-
-		engine = spawn(ENGINE_PATH, ["start"], {
-			env: {
-				...process.env,
-				RIVET__GUARD__HOST: "127.0.0.1",
-				RIVET__GUARD__PORT: String(guardPort),
-				RIVET__API_PEER__HOST: "127.0.0.1",
-				RIVET__API_PEER__PORT: String(apiPeerPort),
-				RIVET__METRICS__HOST: "127.0.0.1",
-				RIVET__METRICS__PORT: String(metricsPort),
-				RIVET__FILE_SYSTEM__PATH: engineStorage,
-			},
-			stdio: "ignore",
-		});
-		await waitForHealth(engine, endpoint, 30_000);
+		const collectorPort = await getPort({ host: "127.0.0.1" });
+		const startedEngine = await startEngine("rivetkit-otel-engine-");
+		engine = startedEngine.child;
+		engineStorage = startedEngine.storage;
+		const endpoint = startedEngine.endpoint;
 
 		const otlpBodies: Buffer[] = [];
 		collector = createServer((request, response) => {
+			if (request.url === "/trace-context") {
+				response.writeHead(200).end(request.headers.traceparent ?? "");
+				return;
+			}
 			const chunks: Buffer[] = [];
 			request.on("data", (chunk: Buffer) => chunks.push(chunk));
 			request.on("end", () => {
@@ -599,37 +673,28 @@ describe.sequential("native NAPI runtime integration", () => {
 			collector?.listen(collectorPort, "127.0.0.1", resolve),
 		);
 
-		runtimeLogs = { stdout: "", stderr: "" };
-		runtime = spawn(process.execPath, ["--import", "tsx", FIXTURE_PATH], {
-			cwd: dirname(TEST_DIR),
-			env: {
-				...process.env,
-				RIVET_TOKEN: TOKEN,
-				RIVET_NAMESPACE: NAMESPACE,
-				RIVETKIT_TEST_ENDPOINT: endpoint,
-				RIVETKIT_TEST_POOL_NAME: poolName,
-				RIVET_LOG_LEVEL: "info",
-				OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `http://127.0.0.1:${collectorPort}/v1/traces`,
-				OTEL_SERVICE_NAME: "rivetkit-actor-call-integration",
-			},
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-		runtime.stdout?.on("data", (chunk) => {
-			runtimeLogs.stdout += chunk.toString();
-		});
-		runtime.stderr?.on("data", (chunk) => {
-			runtimeLogs.stderr += chunk.toString();
+		runtime = spawnFixture({
+			RIVET_TOKEN: TOKEN,
+			RIVET_NAMESPACE: NAMESPACE,
+			RIVETKIT_TEST_ENDPOINT: endpoint,
+			RIVETKIT_TEST_POOL_NAME: poolName,
+			RIVET_LOG_LEVEL: "info",
+			OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `http://127.0.0.1:${collectorPort}/v1/traces`,
+			OTEL_SERVICE_NAME: "rivetkit-actor-call-integration",
+			OTEL_TRACES_SAMPLER: "always_on",
+			RIVETKIT_TEST_JS_OTEL: "1",
+			RIVETKIT_TEST_TRACE_ECHO_URL: `http://127.0.0.1:${collectorPort}/trace-context`,
 		});
 
 		await upsertNormalRunnerConfig(runtime, endpoint, poolName);
 		await waitForEnvoy(runtime, endpoint, poolName, 30_000);
-		const client = createClient<any>({
+		const client = createClient<NapiRuntimeFixtureRegistry>({
 			endpoint,
 			token: TOKEN,
 			namespace: NAMESPACE,
 			poolName,
 			disableMetadataLookup: true,
-		}) as any;
+		});
 		const actorKey = `correlation-${crypto.randomUUID()}`;
 		const handle = await waitForActorReady(
 			() => client.correlationSource.create([actorKey]),
@@ -646,6 +711,42 @@ describe.sequential("native NAPI runtime integration", () => {
 		expect(await Promise.all(tokens.map((token) => handle.relay(token)))).toEqual(
 			tokens,
 		);
+		const fetchTokens = [crypto.randomUUID(), crypto.randomUUID()];
+		const fetchTraceparents = await Promise.all(
+			fetchTokens.map((token) => handle.fetchTraceparent(token)),
+		);
+		await waitFor(
+			() =>
+				fetchTokens.every((token) =>
+					runtimeLogs.stdout.includes(`correlation_token=${token}`),
+				),
+			10_000,
+			`timed out waiting for fetch logs:\n${runtimeLogs.stdout}`,
+		);
+		const fetchContexts = fetchTokens.map((token, index) => {
+			const line = runtimeLogs.stdout
+				.split("\n")
+				.find(
+					(candidate) =>
+						candidate.includes(`correlation_token=${token}`) &&
+						logField(candidate, "correlation_role") === "fetch",
+				)!;
+			const actionTraceId = logField(line, "trace_id")!;
+			const actionSpanId = logField(line, "span_id")!;
+			const traceparent = fetchTraceparents[index] as string;
+			const [, childTraceId, childSpanId] = traceparent.split("-");
+			expect(childTraceId).toBe(actionTraceId);
+			expect(childSpanId).not.toBe(actionSpanId);
+			return { traceId: childTraceId, spanId: childSpanId };
+		});
+		expect(fetchContexts[0]?.traceId).not.toBe(fetchContexts[1]?.traceId);
+		expect(fetchContexts[0]?.spanId).not.toBe(fetchContexts[1]?.spanId);
+		expect(
+			await Promise.all([
+				handle.databaseOverlapA("A"),
+				handle.databaseOverlapB("B"),
+			]),
+		).toEqual(["A", "B"]);
 		const scheduledToken = crypto.randomUUID();
 		expect(await handle.scheduleOnce(scheduledToken)).toBe(scheduledToken);
 		const scheduledDeadline = Date.now() + 10_000;
@@ -708,6 +809,22 @@ describe.sequential("native NAPI runtime integration", () => {
 				name: "correlationTarget.receive",
 			});
 		}
+		for (const [actionName, operation] of [
+			["databaseOverlapA", "rivet.sqlite.execute"],
+			["databaseOverlapB", "rivet.kv.get"],
+		] as const) {
+			const action = spans.find(
+				(span) => span.name === "correlationSource." + actionName,
+			);
+			expect(action).toBeDefined();
+			expect(
+				spans.find(
+					(span) =>
+						span.name === operation &&
+						span.parentSpanId === action?.spanId,
+				),
+			).toMatchObject({ traceId: action?.traceId });
+		}
 		const scheduleOrigin = spans.find(
 			(span) => span.name === "correlationSource.scheduleOnce",
 		);
@@ -756,5 +873,53 @@ describe.sequential("native NAPI runtime integration", () => {
 			.filter((span) => span.name === "rivet.actor.connection.disconnect")
 			.map((span) => span.attributes.get("rivet.connection.id"));
 		expect(disconnectedIds.some((id) => id && connectedIds.has(id))).toBe(true);
+	}, 120_000);
+
+	test("keeps actor actions working when standard sampling disables trace recording", async () => {
+		const poolName = "default";
+		const collectorPort = await getPort({ host: "127.0.0.1" });
+		const startedEngine = await startEngine("rivetkit-otel-sampling-");
+		engine = startedEngine.child;
+		engineStorage = startedEngine.storage;
+		const endpoint = startedEngine.endpoint;
+
+		let exportRequests = 0;
+		collector = createServer((_request, response) => {
+			exportRequests += 1;
+			response.writeHead(200).end();
+		});
+		await new Promise<void>((resolve) =>
+			collector?.listen(collectorPort, "127.0.0.1", resolve),
+		);
+
+		runtime = spawnFixture({
+			RIVET_TOKEN: TOKEN,
+			RIVET_NAMESPACE: NAMESPACE,
+			RIVETKIT_TEST_ENDPOINT: endpoint,
+			RIVETKIT_TEST_POOL_NAME: poolName,
+			OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `http://127.0.0.1:${collectorPort}/v1/traces`,
+			OTEL_TRACES_SAMPLER: "always_off",
+		});
+
+		await upsertNormalRunnerConfig(runtime, endpoint, poolName);
+		await waitForEnvoy(runtime, endpoint, poolName, 30_000);
+		const client = createClient<NapiRuntimeFixtureRegistry>({
+			endpoint,
+			token: TOKEN,
+			namespace: NAMESPACE,
+			poolName,
+			disableMetadataLookup: true,
+		});
+		const handle = await waitForActorReady(
+			() => client.correlationSource.create([crypto.randomUUID()]),
+			30_000,
+		);
+		const token = crypto.randomUUID();
+		expect(await handle.relay(token)).toBe(token);
+
+		await client.dispose();
+		await stopRuntime(runtime);
+		runtime = undefined;
+		expect(exportRequests).toBe(0);
 	}, 120_000);
 });
