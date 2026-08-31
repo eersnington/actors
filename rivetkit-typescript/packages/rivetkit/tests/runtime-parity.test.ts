@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { describe, expect, test } from "vitest";
 import {
 	BRIDGE_RIVET_ERROR_PREFIX,
@@ -6,7 +7,10 @@ import {
 } from "@/actor/errors";
 import { actor } from "@/actor/mod";
 import { type RegistryConfig, RegistryConfigSchema } from "@/registry/config";
-import { NapiCoreRuntime } from "@/registry/napi-runtime";
+import {
+	type NapiActorInvocationContext,
+	NapiCoreRuntime,
+} from "@/registry/napi-runtime";
 import { buildNativeFactory } from "@/registry/native";
 import type {
 	ActorContextHandle,
@@ -15,6 +19,8 @@ import type {
 } from "@/registry/runtime";
 import { type WasmBindings, WasmCoreRuntime } from "@/registry/wasm-runtime";
 import { decodeCborCompat, encodeCborCompat } from "@/serde";
+
+const napiInvocationContext = new AsyncLocalStorage<NapiActorInvocationContext>();
 
 const serveConfig: RuntimeServeConfig = {
 	version: 4,
@@ -141,6 +147,10 @@ class FakeActorContext {
 
 	runtimeState(): object {
 		return this.runtimeBag;
+	}
+
+	invocationTraceContext(): undefined {
+		return undefined;
 	}
 
 	actorId(): string {
@@ -307,7 +317,10 @@ function createRuntimeCase(kind: CoreRuntime["kind"]): RuntimeCase {
 		scenario,
 		runtime:
 			kind === "napi"
-				? new NapiCoreRuntime(fakeNapiBindings(scenario) as never)
+				? new NapiCoreRuntime(
+						fakeNapiBindings(scenario) as never,
+						napiInvocationContext,
+					)
 				: new WasmCoreRuntime(fakeWasmBindings(scenario)),
 	};
 }

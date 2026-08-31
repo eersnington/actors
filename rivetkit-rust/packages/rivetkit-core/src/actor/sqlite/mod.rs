@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::io::Cursor;
 use std::sync::{
 	Arc,
@@ -175,6 +176,7 @@ pub struct SqliteDb {
 	/// always sets up sqlite storage under the hood, so handle/actor_id are
 	/// not a reliable signal for whether the user opted in; this flag is.
 	enabled: bool,
+	telemetry: Option<crate::telemetry::ActorInvocationTelemetry>,
 	#[cfg(feature = "sqlite-local")]
 	// Forced-sync: native SQLite handles are used inside spawn_blocking and
 	// synchronous diagnostic accessors.
@@ -209,6 +211,7 @@ impl SqliteDb {
 			generation,
 			backend: select_sqlite_backend(remote_sqlite)?,
 			enabled,
+			telemetry: None,
 			#[cfg(feature = "sqlite-local")]
 			db: Default::default(),
 			#[cfg(feature = "sqlite-local")]
@@ -359,6 +362,10 @@ impl SqliteDb {
 
 	pub async fn exec(&self, sql: impl Into<String>) -> Result<QueryResult> {
 		let sql = sql.into();
+		self.trace_operation("exec", self.exec_untraced(sql)).await
+	}
+
+	async fn exec_untraced(&self, sql: String) -> Result<QueryResult> {
 		let sql_for_log = sql.clone();
 		let result = match self.begin_regular_operation().await {
 			Ok(_guard) => self.exec_backend(sql).await,
@@ -380,6 +387,15 @@ impl SqliteDb {
 		params: Option<Vec<BindParam>>,
 	) -> Result<QueryResult> {
 		let sql = sql.into();
+		self.trace_operation("query", self.query_untraced(sql, params))
+			.await
+	}
+
+	async fn query_untraced(
+		&self,
+		sql: String,
+		params: Option<Vec<BindParam>>,
+	) -> Result<QueryResult> {
 		let sql_for_log = sql.clone();
 		let binding_count = bind_param_count(&params);
 		let result = match self.begin_regular_operation().await {
@@ -402,6 +418,15 @@ impl SqliteDb {
 		params: Option<Vec<BindParam>>,
 	) -> Result<ExecResult> {
 		let sql = sql.into();
+		self.trace_operation("run", self.run_untraced(sql, params))
+			.await
+	}
+
+	async fn run_untraced(
+		&self,
+		sql: String,
+		params: Option<Vec<BindParam>>,
+	) -> Result<ExecResult> {
 		let sql_for_log = sql.clone();
 		let binding_count = bind_param_count(&params);
 		let result = match self.begin_regular_operation().await {
@@ -424,6 +449,15 @@ impl SqliteDb {
 		params: Option<Vec<BindParam>>,
 	) -> Result<ExecuteResult> {
 		let sql = sql.into();
+		self.trace_operation("execute", self.execute_untraced(sql, params))
+			.await
+	}
+
+	async fn execute_untraced(
+		&self,
+		sql: String,
+		params: Option<Vec<BindParam>>,
+	) -> Result<ExecuteResult> {
 		let sql_for_log = sql.clone();
 		let binding_count = bind_param_count(&params);
 		let result = match self.begin_regular_operation().await {
@@ -444,6 +478,28 @@ impl SqliteDb {
 		&self,
 		statements: Vec<SqliteBatchStatement>,
 	) -> Result<Vec<ExecuteResult>> {
+		self.trace_operation(
+			"execute_batch",
+			self.execute_batch_untraced(statements),
+		)
+		.await
+	}
+
+	async fn trace_operation<T>(
+		&self,
+		operation: &'static str,
+		future: impl Future<Output = Result<T>>,
+	) -> Result<T> {
+		match &self.telemetry {
+			Some(telemetry) => telemetry.trace("sqlite", operation, future).await,
+			None => future.await,
+		}
+	}
+
+	async fn execute_batch_untraced(
+		&self,
+		statements: Vec<SqliteBatchStatement>,
+	) -> Result<Vec<ExecuteResult>> {
 		let statement_count = statements.len();
 		let binding_count = statements
 			.iter()
@@ -456,7 +512,13 @@ impl SqliteDb {
 			}
 		} else {
 			async {
-				let transaction = self.begin_transaction(None).await?;
+				// The batch is one public operation. Its internal transaction must not
+				// change the exported span shape between local and remote backends.
+				let transaction = self
+					.clone()
+					.with_invocation_telemetry(None)
+					.begin_transaction(None)
+					.await?;
 				let mut results = Vec::with_capacity(statements.len());
 				for statement in statements {
 					match transaction.execute(statement.sql, statement.params).await {
@@ -496,6 +558,14 @@ impl SqliteDb {
 				Err(error)
 			}
 		}
+	}
+
+	pub fn with_invocation_telemetry(
+		mut self,
+		telemetry: Option<crate::telemetry::ActorInvocationTelemetry>,
+	) -> Self {
+		self.telemetry = telemetry;
+		self
 	}
 
 	pub async fn close(&self) -> Result<()> {

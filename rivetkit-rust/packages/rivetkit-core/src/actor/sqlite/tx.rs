@@ -182,9 +182,12 @@ impl SqliteDb {
 		}
 
 		let db = self.clone();
-		run_detached_transaction_task(
-			async move { db.begin_transaction_inner(key, timeout).await },
-			"sqlite transaction begin task failed",
+		self.trace_operation(
+			"transaction.begin",
+			run_detached_transaction_task(
+				async move { db.begin_transaction_inner(key, timeout).await },
+				"sqlite transaction begin task failed",
+			),
 		)
 		.await
 	}
@@ -321,9 +324,12 @@ impl SqliteDb {
 	async fn transaction_exec(&self, key: &str, sql: String) -> Result<QueryResult> {
 		let db = self.clone();
 		let key = key.to_owned();
-		run_detached_transaction_task(
-			async move { db.transaction_exec_inner(&key, sql).await },
-			"sqlite transaction exec task failed",
+		self.trace_operation(
+			"transaction.exec",
+			run_detached_transaction_task(
+				async move { db.transaction_exec_inner(&key, sql).await },
+				"sqlite transaction exec task failed",
+			),
 		)
 		.await
 	}
@@ -346,9 +352,12 @@ impl SqliteDb {
 	) -> Result<ExecuteResult> {
 		let db = self.clone();
 		let key = key.to_owned();
-		run_detached_transaction_task(
-			async move { db.transaction_execute_inner(&key, sql, params).await },
-			"sqlite transaction execute task failed",
+		self.trace_operation(
+			"transaction.execute",
+			run_detached_transaction_task(
+				async move { db.transaction_execute_inner(&key, sql, params).await },
+				"sqlite transaction execute task failed",
+			),
 		)
 		.await
 	}
@@ -374,9 +383,16 @@ impl SqliteDb {
 	async fn finish_transaction(&self, key: &str, commit: bool) -> Result<()> {
 		let db = self.clone();
 		let key = key.to_owned();
-		run_detached_transaction_task(
-			async move { db.finish_transaction_inner(&key, commit).await },
-			"sqlite transaction finish task failed",
+		self.trace_operation(
+			if commit {
+				"transaction.commit"
+			} else {
+				"transaction.rollback"
+			},
+			run_detached_transaction_task(
+				async move { db.finish_transaction_inner(&key, commit).await },
+				"sqlite transaction finish task failed",
+			),
 		)
 		.await
 	}

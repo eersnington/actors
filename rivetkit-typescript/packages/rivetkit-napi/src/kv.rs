@@ -1,17 +1,17 @@
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
-use rivetkit_core::{ActorContext as CoreActorContext, ListOpts};
+use rivetkit_core::{ActorKv as CoreActorKv, ListOpts};
 
 use crate::types::{JsKvEntry, JsKvListOptions};
 use crate::{NapiInvalidArgument, napi_anyhow_error};
 
 #[napi]
 pub struct Kv {
-	inner: CoreActorContext,
+	inner: CoreActorKv,
 }
 
 impl Kv {
-	pub(crate) fn new(inner: CoreActorContext) -> Self {
+	pub(crate) fn new(inner: CoreActorKv) -> Self {
 		Self { inner }
 	}
 }
@@ -22,16 +22,16 @@ impl Kv {
 	#[napi]
 	pub async fn get(&self, key: Buffer) -> napi::Result<Option<Buffer>> {
 		self.inner
-			.kv_batch_get(&[key.as_ref()])
+			.get(key.as_ref())
 			.await
-			.map(|mut values| values.pop().flatten().map(Buffer::from))
+			.map(|value| value.map(Buffer::from))
 			.map_err(napi_anyhow_error)
 	}
 
 	#[napi]
 	pub async fn put(&self, key: Buffer, value: Buffer) -> napi::Result<()> {
 		self.inner
-			.kv_batch_put(&[(key.as_ref(), value.as_ref())])
+			.put(key.as_ref(), value.as_ref())
 			.await
 			.map_err(napi_anyhow_error)
 	}
@@ -39,7 +39,7 @@ impl Kv {
 	#[napi]
 	pub async fn delete(&self, key: Buffer) -> napi::Result<()> {
 		self.inner
-			.kv_batch_delete(&[key.as_ref()])
+			.delete(key.as_ref())
 			.await
 			.map_err(napi_anyhow_error)
 	}
@@ -47,7 +47,7 @@ impl Kv {
 	#[napi]
 	pub async fn delete_range(&self, start: Buffer, end: Buffer) -> napi::Result<()> {
 		self.inner
-			.kv_delete_range(start.as_ref(), end.as_ref())
+			.delete_range(start.as_ref(), end.as_ref())
 			.await
 			.map_err(napi_anyhow_error)
 	}
@@ -59,7 +59,7 @@ impl Kv {
 		options: Option<JsKvListOptions>,
 	) -> napi::Result<Vec<JsKvEntry>> {
 		self.inner
-			.kv_list_prefix(prefix.as_ref(), list_opts(options)?)
+			.list_prefix(prefix.as_ref(), list_opts(options)?)
 			.await
 			.map(|entries| {
 				entries
@@ -81,7 +81,7 @@ impl Kv {
 		options: Option<JsKvListOptions>,
 	) -> napi::Result<Vec<JsKvEntry>> {
 		self.inner
-			.kv_list_range(start.as_ref(), end.as_ref(), list_opts(options)?)
+			.list_range(start.as_ref(), end.as_ref(), list_opts(options)?)
 			.await
 			.map(|entries| {
 				entries
@@ -99,7 +99,7 @@ impl Kv {
 	pub async fn batch_get(&self, keys: Vec<Buffer>) -> napi::Result<Vec<Option<Buffer>>> {
 		let key_refs: Vec<&[u8]> = keys.iter().map(Buffer::as_ref).collect();
 		self.inner
-			.kv_batch_get(&key_refs)
+			.batch_get(&key_refs)
 			.await
 			.map(|values| {
 				values
@@ -117,7 +117,7 @@ impl Kv {
 			.map(|entry| (entry.key.as_ref(), entry.value.as_ref()))
 			.collect();
 		self.inner
-			.kv_batch_put(&entry_refs)
+			.batch_put(&entry_refs)
 			.await
 			.map_err(napi_anyhow_error)
 	}
@@ -126,7 +126,7 @@ impl Kv {
 	pub async fn batch_delete(&self, keys: Vec<Buffer>) -> napi::Result<()> {
 		let key_refs: Vec<&[u8]> = keys.iter().map(Buffer::as_ref).collect();
 		self.inner
-			.kv_batch_delete(&key_refs)
+			.batch_delete(&key_refs)
 			.await
 			.map_err(napi_anyhow_error)
 	}

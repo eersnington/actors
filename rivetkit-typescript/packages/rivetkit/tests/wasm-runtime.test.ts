@@ -1,8 +1,12 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { describe, expect, test, vi } from "vitest";
 import { BRIDGE_RIVET_ERROR_PREFIX, RivetError } from "@/actor/errors";
 import { actor } from "@/actor/mod";
 import { RegistryConfigSchema } from "@/registry/config";
-import { NapiCoreRuntime } from "@/registry/napi-runtime";
+import {
+	type NapiActorInvocationContext,
+	NapiCoreRuntime,
+} from "@/registry/napi-runtime";
 import { buildNativeFactory } from "@/registry/native";
 import type {
 	ActorContextHandle,
@@ -15,6 +19,8 @@ import {
 	WasmCoreRuntime,
 } from "@/registry/wasm-runtime";
 import { decodeCborJsonCompat, encodeCborCompat } from "@/serde";
+
+const napiInvocationContext = new AsyncLocalStorage<NapiActorInvocationContext>();
 
 const serveConfig: RuntimeServeConfig = {
 	version: 4,
@@ -240,7 +246,7 @@ describe("WasmCoreRuntime", () => {
 		const acceptRuntime = (_runtime: CoreRuntime) => {};
 
 		acceptRuntime(new WasmCoreRuntime(fakeWasmBindings()));
-		acceptRuntime(new NapiCoreRuntime({} as never));
+		acceptRuntime(new NapiCoreRuntime({} as never, napiInvocationContext));
 	});
 
 	test("maps raw wasm registry, factory, and cancellation handles", () => {
@@ -370,7 +376,10 @@ describe("WasmCoreRuntime", () => {
 		} as unknown as ActorContextHandle;
 
 		expect(
-			new NapiCoreRuntime({} as never).actorQueueMaxSize(context),
+			new NapiCoreRuntime(
+				{} as never,
+				napiInvocationContext,
+			).actorQueueMaxSize(context),
 		).toBe(maxSize);
 		expect(
 			new WasmCoreRuntime(fakeWasmBindings()).actorQueueMaxSize(context),

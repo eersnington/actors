@@ -62,6 +62,7 @@ pub struct ActorContext(pub(crate) Arc<ActorContextInner>);
 #[derive(Clone)]
 pub struct ActorKv {
 	sql: SqliteDb,
+	telemetry: Option<crate::telemetry::ActorInvocationTelemetry>,
 }
 
 pub(crate) struct ActorContextInner {
@@ -186,32 +187,44 @@ impl ActivityState {
 
 impl ActorKv {
 	pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-		let mut values = self.batch_get(&[key]).await?;
-		Ok(values.pop().flatten())
+		self.trace("get", async {
+			let mut values = internal_storage::user_kv_batch_get(&self.sql, &[key]).await?;
+			Ok(values.pop().flatten())
+		})
+		.await
 	}
 
 	pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-		self.batch_put(&[(key, value)]).await
+		self.trace("put", internal_storage::user_kv_batch_put(&self.sql, &[(key, value)]))
+			.await
 	}
 
 	pub async fn delete(&self, key: &[u8]) -> Result<()> {
-		self.batch_delete(&[key]).await
+		self.trace("delete", internal_storage::user_kv_batch_delete(&self.sql, &[key]))
+			.await
 	}
 
 	pub async fn batch_get(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>> {
-		internal_storage::user_kv_batch_get(&self.sql, keys).await
+		self.trace("batch_get", internal_storage::user_kv_batch_get(&self.sql, keys))
+			.await
 	}
 
 	pub async fn batch_put(&self, entries: &[(&[u8], &[u8])]) -> Result<()> {
-		internal_storage::user_kv_batch_put(&self.sql, entries).await
+		self.trace("batch_put", internal_storage::user_kv_batch_put(&self.sql, entries))
+			.await
 	}
 
 	pub async fn batch_delete(&self, keys: &[&[u8]]) -> Result<()> {
-		internal_storage::user_kv_batch_delete(&self.sql, keys).await
+		self.trace("batch_delete", internal_storage::user_kv_batch_delete(&self.sql, keys))
+			.await
 	}
 
 	pub async fn delete_range(&self, start: &[u8], end: &[u8]) -> Result<()> {
-		internal_storage::user_kv_delete_range(&self.sql, start, end).await
+		self.trace(
+			"delete_range",
+			internal_storage::user_kv_delete_range(&self.sql, start, end),
+		)
+		.await
 	}
 
 	pub async fn list_prefix(
@@ -219,7 +232,11 @@ impl ActorKv {
 		prefix: &[u8],
 		opts: ListOpts,
 	) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-		internal_storage::user_kv_list_prefix(&self.sql, prefix, opts).await
+		self.trace(
+			"list_prefix",
+			internal_storage::user_kv_list_prefix(&self.sql, prefix, opts),
+		)
+		.await
 	}
 
 	pub async fn list_range(
@@ -228,7 +245,30 @@ impl ActorKv {
 		end: &[u8],
 		opts: ListOpts,
 	) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-		internal_storage::user_kv_list_range(&self.sql, start, end, opts).await
+		self.trace(
+			"list_range",
+			internal_storage::user_kv_list_range(&self.sql, start, end, opts),
+		)
+		.await
+	}
+
+	pub fn with_invocation_telemetry(
+		mut self,
+		telemetry: Option<crate::telemetry::ActorInvocationTelemetry>,
+	) -> Self {
+		self.telemetry = telemetry;
+		self
+	}
+
+	async fn trace<T>(
+		&self,
+		operation: &'static str,
+		future: impl Future<Output = Result<T>>,
+	) -> Result<T> {
+		match &self.telemetry {
+			Some(telemetry) => telemetry.trace("kv", operation, future).await,
+			None => future.await,
+		}
 	}
 }
 
@@ -287,7 +327,10 @@ impl ActorContext {
 		let abort_signal = CancellationToken::new();
 		let shutdown_deadline = CancellationToken::new();
 		let sleep = SleepState::new(config.clone());
-		let user_kv = ActorKv { sql: sql.clone() };
+		let user_kv = ActorKv {
+			sql: sql.clone(),
+			telemetry: None,
+		};
 		let ctx = Self(Arc::new(ActorContextInner {
 			legacy_kv,
 			user_kv,
