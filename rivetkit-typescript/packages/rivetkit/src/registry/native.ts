@@ -76,6 +76,7 @@ import {
 } from "@/utils/node";
 import { logger } from "./log";
 import { loadNapiRuntime } from "./napi-runtime";
+import { runWithActorInvocationTrace } from "./otel-context";
 import {
 	type NativeValidationConfig,
 	validateActionArgs,
@@ -503,6 +504,7 @@ function closeNativeSqlDatabase(
 	runtimeState.sql = undefined;
 	return database.close();
 }
+
 async function closeNativeDatabaseClient(
 	runtime: CoreRuntime,
 	ctx: ActorContextHandle,
@@ -3721,9 +3723,7 @@ export function buildNativeFactory(
 			),
 			{ encoding: "bare" },
 			() =>
-				callNativeSync(() =>
-					runtime.actorInvocationTraceContext?.(ctx),
-				),
+				callNativeSync(() => runtime.actorInvocationTraceContext(ctx)),
 		);
 	const nativeRunHandlerActiveByActorId = new Map<string, boolean>();
 	const isNativeRunHandlerActive = (ctx: ActorContextHandle) =>
@@ -4942,6 +4942,9 @@ export function buildNativeFactory(
 					) => {
 						const { ctx, conn, args, scheduledFire, cancelToken } =
 							unwrapTsfnPayload(error, payload);
+						const invocationTraceContext = callNativeSync(() =>
+							runtime.actorInvocationTraceContext(ctx),
+						);
 						const actorCtx =
 							conn != null
 								? makeConnCtx(ctx, conn, undefined, cancelToken)
@@ -4965,7 +4968,11 @@ export function buildNativeFactory(
 						};
 						return await runtime.runWithActorInvocationContext(
 							ctx,
-							runAction,
+							() =>
+								runWithActorInvocationTrace(
+									invocationTraceContext,
+									runAction,
+								),
 						);
 					},
 				),

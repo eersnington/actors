@@ -7,7 +7,33 @@ import { db } from "../../src/db/mod";
 import { actor, event, queue, setup, UserError } from "../../src/mod";
 import { buildNativeRegistry } from "../../src/registry/native";
 
+if (process.env.RIVETKIT_TEST_JS_OTEL === "1") {
+	const [{ registerInstrumentations }, { UndiciInstrumentation }, { NodeTracerProvider }] =
+		await Promise.all([
+			import("@opentelemetry/instrumentation"),
+			import("@opentelemetry/instrumentation-undici"),
+			import("@opentelemetry/sdk-trace-node"),
+		]);
+	new NodeTracerProvider().register();
+	registerInstrumentations({
+		instrumentations: [
+			new UndiciInstrumentation({
+				ignoreRequestHook: (request) => request.path !== "/trace-context",
+			}),
+		],
+	});
+}
+
 const textDecoder = new TextDecoder();
+let readPrometheusMetrics: (() => Promise<string>) | undefined;
+let databaseOverlapCount = 0;
+const databaseOverlap = Promise.withResolvers<void>();
+
+async function waitForDatabaseOverlap(): Promise<void> {
+	databaseOverlapCount += 1;
+	if (databaseOverlapCount === 2) databaseOverlap.resolve();
+	await databaseOverlap.promise;
+}
 const fixtureDir = dirname(fileURLToPath(import.meta.url));
 const repoEngineBinary = resolve(
 	fixtureDir,
@@ -44,9 +70,11 @@ const correlationTarget = actor({
 });
 
 const correlationSource = actor({
+	db: db(),
 	state: {
 		scheduledToken: "",
 	},
+	createVars: (c) => ({ database: c.db, kv: c.kv }),
 	onWake: async () => {},
 	onConnect: async () => {},
 	onDisconnect: async () => {},
@@ -59,15 +87,49 @@ const correlationSource = actor({
 		);
 	},
 	actions: {
+		databaseOverlapA: async (c, token: string) => {
+			await waitForDatabaseOverlap();
+			await c.vars.database.execute("SELECT 1");
+			return token;
+		},
+		databaseOverlapB: async (c, token: string) => {
+			await waitForDatabaseOverlap();
+			await c.vars.kv.get(token);
+			return token;
+		},
+		failInvocation: () => {
+			throw new UserError("expected invocation failure", {
+				code: "expected_failure",
+			});
+		},
+		fetchTraceparent: async (c, token: string) => {
+			c.log.info({
+				msg: "making instrumented outbound request",
+				correlation_role: "fetch",
+				correlation_token: token,
+			});
+			const endpoint = process.env.RIVETKIT_TEST_TRACE_ECHO_URL;
+			if (!endpoint) throw new Error("missing trace echo URL");
+			return await (await fetch(endpoint)).text();
+		},
 		scheduleOnce: async (c, token: string) => {
 			await c.schedule.after(100, "completeScheduled", token);
 			return token;
 		},
 		completeScheduled: (c, token: string) => {
+			c.log.info({
+				msg: "completed correlated schedule",
+				correlation_role: "scheduled",
+				correlation_token: token,
+			});
 			c.state.scheduledToken = token;
 			return token;
 		},
 		getScheduledToken: (c) => c.state.scheduledToken,
+		getPrometheusMetrics: async () => {
+			if (!readPrometheusMetrics) throw new Error("metrics are not ready");
+			return await readPrometheusMetrics();
+		},
 		relay: async (c, token: string) => {
 			c.log.info({
 				msg: "sending correlated actor call",
@@ -75,9 +137,22 @@ const correlationSource = actor({
 				correlation_token: token,
 			});
 			return await c
-				.client<any>()
+				.client<typeof registry>()
 				.correlationTarget.getOrCreate([token])
 				.receive(token);
+		},
+		correlateWithoutTracing: async (c, token: string) => {
+			c.log.info({
+				msg: "starting correlation without trace export",
+				correlation_role: "source",
+				correlation_token: token,
+			});
+			await c
+				.client<typeof registry>()
+				.correlationTarget.getOrCreate([token])
+				.receive(token);
+			await c.schedule.after(100, "completeScheduled", token);
+			return token;
 		},
 	},
 });
@@ -173,7 +248,7 @@ const integrationActor = actor({
 			};
 		},
 		getCountViaClient: async (c) => {
-			const client = c.client<any>();
+			const client = c.client<typeof registry>();
 			return await client.integrationActor.getForId(c.actorId).getCount();
 		},
 		throwTypedError: async () => {
@@ -208,9 +283,15 @@ const registry = setup({
 	},
 });
 
-const { registry: nativeRegistry, serveConfig } = await buildNativeRegistry(
-	registry.parseConfig(),
-);
+export type NapiRuntimeFixtureRegistry = typeof registry;
+
+const { runtime, registry: nativeRegistry, serveConfig } =
+	await buildNativeRegistry(registry.parseConfig());
+readPrometheusMetrics = async () => {
+	if (!runtime.registryMetrics) throw new Error("metrics are not supported");
+	const response = await runtime.registryMetrics(nativeRegistry);
+	return textDecoder.decode(response.body);
+};
 serveConfig.engineBinaryPath = resolveEngineBinaryPath();
 
 await nativeRegistry.serve(serveConfig);
