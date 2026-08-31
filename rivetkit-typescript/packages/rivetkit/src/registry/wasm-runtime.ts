@@ -508,6 +508,10 @@ export class WasmCoreRuntime implements CoreRuntime {
 	): T {
 		return run();
 	}
+
+	actorInvocationTraceContext(): undefined {
+		return undefined;
+	}
 	actorName(ctx: ActorContextHandle): string {
 		return callHandle(asWasmActorContext(ctx), "name");
 	}

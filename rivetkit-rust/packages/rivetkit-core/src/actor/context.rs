@@ -1713,16 +1713,14 @@ impl ActorContext {
 					);
 				}
 			}
-			if let Some(telemetry) = telemetry {
-				let error_type = dispatch_error.as_ref().map(|error| {
-					let structured = rivet_error::RivetError::extract(error);
-					format!("{}.{}", structured.group(), structured.code())
-				});
-				telemetry.finish(
-					if dispatch_error.is_some() { "ERROR" } else { "OK" },
-					error_type,
-				);
-			}
+			let error_type = dispatch_error.as_ref().map(|error| {
+				let structured = rivet_error::RivetError::extract(error);
+				format!("{}.{}", structured.group(), structured.code())
+			});
+			telemetry.finish(
+				if dispatch_error.is_some() { "ERROR" } else { "OK" },
+				error_type,
+			);
 
 			ctx.finish_schedule_dispatch(&event_id, history_id, dispatch_error.as_ref())
 				.await;

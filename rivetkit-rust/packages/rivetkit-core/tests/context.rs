@@ -1168,7 +1168,9 @@ mod moved_tests {
 		);
 		let trace_context = crate::telemetry::DurableTraceContext {
 			ray_id: "ray-durable".to_owned(),
-			traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned(),
+			traceparent: Some(
+				"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned(),
+			),
 			tracestate: Some("vendor=value".to_owned()),
 		};
 		ctx.at_with_trace_context(

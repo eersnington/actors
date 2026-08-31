@@ -8,12 +8,17 @@ use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider};
 
 static PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
+static PROVIDER_INIT: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 pub(crate) fn initialize_if_configured() -> Result<Option<SdkTracer>, opentelemetry::trace::TraceError>
 {
 	if !export_is_configured() {
 		return Ok(None);
 	}
+	if let Some(provider) = PROVIDER.get() {
+		return Ok(Some(provider.tracer("rivetkit")));
+	}
+	let _init = PROVIDER_INIT.lock();
 	if let Some(provider) = PROVIDER.get() {
 		return Ok(Some(provider.tracer("rivetkit")));
 	}
@@ -28,7 +33,7 @@ pub(crate) fn initialize_if_configured() -> Result<Option<SdkTracer>, openteleme
 		.with_batch_exporter(exporter)
 		.build();
 	let tracer = provider.tracer("rivetkit");
-	let _ = PROVIDER.set(provider);
+	debug_assert!(PROVIDER.set(provider).is_ok());
 	Ok(Some(tracer))
 }
 

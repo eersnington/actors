@@ -25,15 +25,21 @@ export interface RuntimeActorKeySegment {
 	numberValue?: number;
 }
 
-export interface RuntimeActorInvocationTraceContext {
-	readonly rayId: string;
-	readonly span: {
-		readonly traceId: string;
-		readonly spanId: string;
-		readonly traceparent: string;
-		readonly tracestate?: string;
-	};
-}
+export type RuntimeActorInvocationTraceContext =
+	| {
+			readonly rayId: string;
+			readonly span?: undefined;
+	  }
+	| {
+			readonly rayId: string;
+			readonly span: {
+				readonly traceId: string;
+				readonly spanId: string;
+				readonly traceFlags: number;
+				readonly traceparent: string;
+				readonly tracestate?: string;
+			};
+	  };
 
 export type CurrentActorInvocation =
 	() => RuntimeActorInvocationTraceContext | undefined;
@@ -527,7 +533,7 @@ export interface CoreRuntime {
 		writes: RuntimeWorkflowKvWrite[],
 	): Promise<void>;
 	actorId(ctx: ActorContextHandle): string;
-	actorInvocationTraceContext?(
+	actorInvocationTraceContext(
 		ctx: ActorContextHandle,
 	): RuntimeActorInvocationTraceContext | undefined;
 	runWithActorInvocationContext<T>(
