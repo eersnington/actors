@@ -4,6 +4,9 @@ import {
 	HEADER_RIVET_SKIP_READY_WAIT,
 	HEADER_RIVET_TARGET,
 	HEADER_RIVET_TOKEN,
+	HEADER_RIVETKIT_RAY_ID,
+	HEADER_TRACEPARENT,
+	HEADER_TRACESTATE,
 } from "@/common/actor-router-consts";
 import { type GatewayRequestOptions, shouldSkipReadyWait } from "./driver";
 
@@ -70,6 +73,19 @@ function buildGuardHeaders(
 	// Add extra headers from config
 	for (const [key, value] of Object.entries(runConfig.headers)) {
 		headers.set(key, value as string);
+	}
+	// Invocation propagation belongs to the active actor call, not static client
+	// configuration. Reapply it after configured headers so it cannot go stale.
+	for (const name of [
+		HEADER_RIVETKIT_RAY_ID,
+		HEADER_TRACEPARENT,
+		HEADER_TRACESTATE,
+	]) {
+		headers.delete(name);
+		const value = actorRequest.headers.get(name);
+		if (value !== null) {
+			headers.set(name, value);
+		}
 	}
 	// Add guard-specific headers
 	if (runConfig.token) {

@@ -40,8 +40,9 @@ import {
 import {
 	type AnyClient,
 	type Client,
-	createClientWithDriver,
+	createActorClientWithDriver,
 } from "@/client/client";
+import type { ActorLogger } from "@/actor/config";
 import { convertRegistryConfigToClientConfig } from "@/client/config";
 import { HEADER_CONN_PARAMS } from "@/common/actor-router-consts";
 import type { AnyDatabaseProvider } from "@/common/database/config";
@@ -2605,6 +2606,7 @@ export class ActorContextHandleAdapter {
 	#db?: unknown;
 	#dispatchCancelToken?: CancellationTokenHandle;
 	#kv?: NativeKvAdapter;
+	#log?: ActorLogger;
 	#queue?: NativeQueueAdapter;
 	#request?: Request;
 	#schedule?: NativeScheduleAdapter;
@@ -2815,7 +2817,24 @@ export class ActorContextHandleAdapter {
 	}
 
 	get log() {
-		return logger();
+		if (!this.#log) {
+			const trace = callNativeSync(() =>
+				this.#runtime.actorInvocationTraceContext?.(this.#ctx),
+			);
+			this.#log = logger().child({
+				actor_id: this.actorId,
+				actor_name: this.name,
+				actor_key: this.key,
+				...(trace
+					? {
+							ray_id: trace.rayId,
+							trace_id: trace.span.traceId,
+							span_id: trace.span.spanId,
+						}
+					: {}),
+			});
+		}
+		return this.#log;
 	}
 
 	get abortSignal(): AbortSignal {
@@ -3691,12 +3710,16 @@ export function buildNativeFactory(
 		events: config.events,
 		queues: config.queues,
 	};
-	const createClient = () =>
-		createClientWithDriver(
+	const createClient = (ctx: ActorContextHandle) =>
+		createActorClientWithDriver(
 			new RemoteEngineControlClient(
 				convertRegistryConfigToClientConfig(registryConfig),
 			),
 			{ encoding: "bare" },
+			() =>
+				callNativeSync(() =>
+					runtime.actorInvocationTraceContext?.(ctx),
+				),
 		);
 	const nativeRunHandlerActiveByActorId = new Map<string, boolean>();
 	const isNativeRunHandlerActive = (ctx: ActorContextHandle) =>
@@ -3735,7 +3758,7 @@ export function buildNativeFactory(
 		new ActorContextHandleAdapter(
 			runtime,
 			ctx,
-			createClient,
+			() => createClient(ctx),
 			schemaConfig,
 			databaseProvider,
 			request,
@@ -3754,7 +3777,7 @@ export function buildNativeFactory(
 			runtime,
 			ctx,
 			conn,
-			createClient,
+			() => createClient(ctx),
 			schemaConfig,
 			databaseProvider,
 			request,
@@ -4978,7 +5001,7 @@ export function buildNativeFactory(
 					runtime,
 					ctx,
 					conn,
-					createClient,
+					() => createClient(ctx),
 					schemaConfig,
 					databaseProvider,
 					jsRequest,

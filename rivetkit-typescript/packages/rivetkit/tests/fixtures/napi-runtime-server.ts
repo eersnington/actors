@@ -30,6 +30,35 @@ const jobSchema = z.object({
 	id: z.string().min(1),
 });
 
+const correlationTarget = actor({
+	actions: {
+		receive: async (c, token: string) => {
+			c.log.info({
+				msg: "received correlated actor call",
+				correlation_role: "target",
+				correlation_token: token,
+			});
+			return token;
+		},
+	},
+});
+
+const correlationSource = actor({
+	actions: {
+		relay: async (c, token: string) => {
+			c.log.info({
+				msg: "sending correlated actor call",
+				correlation_role: "source",
+				correlation_token: token,
+			});
+			return await c
+				.client<any>()
+				.correlationTarget.getOrCreate([token])
+				.receive(token);
+		},
+	},
+});
+
 function resolveEngineBinaryPath(): string {
 	if (existsSync(repoEngineBinary)) {
 		return repoEngineBinary;
@@ -144,6 +173,8 @@ const integrationActor = actor({
 
 const registry = setup({
 	use: {
+		correlationSource,
+		correlationTarget,
 		integrationActor,
 	},
 	endpoint,

@@ -2,6 +2,8 @@ import type { AnyActorDefinition } from "@/actor/definition";
 import type { ActorQuery } from "@/client/query";
 import type { Encoding } from "@/common/encoding";
 import type { EngineControlClient } from "@/engine-client/driver";
+import type { RegistryActors } from "@/registry/config";
+import type { CurrentActorInvocation } from "@/registry/runtime";
 import type { Registry } from "@/registry";
 import type { ActorActionFunction, ActorGatewayOptions } from "./actor-common";
 import {
@@ -16,7 +18,9 @@ import { resolveGatewayTarget } from "./resolve-gateway-target";
 export type { ClientConfig, ClientConfigInput } from "./config";
 
 /** Extract the actor registry from the registry definition. */
-export type ExtractActorsFromRegistry<A extends Registry<any>> =
+type AnyRegistry = Registry<RegistryActors>;
+
+export type ExtractActorsFromRegistry<A extends AnyRegistry> =
 	A extends Registry<infer Actors> ? Actors : never;
 
 /** Extract the registry definition from the client. */
@@ -189,6 +193,7 @@ export class ClientRaw {
 	#driver: EngineControlClient;
 	#encodingKind: Encoding;
 	#gatewayOptions: ActorGatewayOptions;
+	#invocationTraceContext?: CurrentActorInvocation;
 
 	/**
 	 * Creates an instance of Client.
@@ -197,11 +202,13 @@ export class ClientRaw {
 		driver: EngineControlClient,
 		encoding: Encoding | undefined,
 		gatewayOptions: ActorGatewayOptions = {},
+		invocationTraceContext?: CurrentActorInvocation,
 	) {
 		this.#driver = driver;
 
 		this.#encodingKind = encoding ?? "bare";
 		this.#gatewayOptions = gatewayOptions;
+		this.#invocationTraceContext = invocationTraceContext;
 	}
 
 	/**
@@ -397,6 +404,7 @@ export class ClientRaw {
 			this.#encodingKind,
 			actorQuery,
 			this.#gatewayOptions,
+			this.#invocationTraceContext,
 		);
 	}
 
@@ -443,19 +451,45 @@ export class ClientRaw {
  *
  * @template A The actor registry type.
  */
-export type Client<A extends Registry<any>> = ClientRaw & {
+export type Client<A extends AnyRegistry> = ClientRaw & {
 	[K in keyof ExtractActorsFromRegistry<A>]: ActorAccessor<
 		ExtractActorsFromRegistry<A>[K]
 	>;
 };
 
-export type AnyClient = Client<Registry<any>>;
+export type AnyClient = Client<AnyRegistry>;
 
-export function createClientWithDriver<A extends Registry<any>>(
+export function createClientWithDriver<A extends AnyRegistry>(
 	driver: EngineControlClient,
 	config: { encoding?: Encoding; gateway?: ActorGatewayOptions } = {},
 ): Client<A> {
-	const client = new ClientRaw(driver, config.encoding, config.gateway);
+	return createClientWithInvocationContext(driver, config);
+}
+
+/** @internal Used by the actor runtime to propagate its current invocation. */
+export function createActorClientWithDriver<A extends AnyRegistry>(
+	driver: EngineControlClient,
+	config: { encoding?: Encoding; gateway?: ActorGatewayOptions },
+	invocationTraceContext: CurrentActorInvocation,
+): Client<A> {
+	return createClientWithInvocationContext(
+		driver,
+		config,
+		invocationTraceContext,
+	);
+}
+
+function createClientWithInvocationContext<A extends AnyRegistry>(
+	driver: EngineControlClient,
+	config: { encoding?: Encoding; gateway?: ActorGatewayOptions },
+	invocationTraceContext?: CurrentActorInvocation,
+): Client<A> {
+	const client = new ClientRaw(
+		driver,
+		config.encoding,
+		config.gateway,
+		invocationTraceContext,
+	);
 
 	// Create proxy for accessing actors by name
 	return new Proxy(client, {

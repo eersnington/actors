@@ -3,6 +3,9 @@ import type { ActorSpecifier } from "@/actor/errors";
 import {
 	HEADER_CONN_PARAMS,
 	HEADER_ENCODING,
+	HEADER_RIVETKIT_RAY_ID,
+	HEADER_TRACEPARENT,
+	HEADER_TRACESTATE,
 } from "@/common/actor-router-consts";
 import type * as protocol from "@/common/client-protocol";
 import {
@@ -23,6 +26,7 @@ import { AsyncMutex } from "@/common/database/shared";
 import type { Encoding, JsonCompatValue } from "@/common/encoding";
 import { deconstructError } from "@/common/utils";
 import type { EngineControlClient } from "@/engine-client/driver";
+import type { CurrentActorInvocation } from "@/registry/runtime";
 import {
 	decodeCborCompat,
 	deserializeWithEncoding,
@@ -80,6 +84,7 @@ export class ActorHandleRaw {
 	#resolvedActorId?: string;
 	#resolvingActorId?: Promise<string>;
 	#queueSendMutex = new AsyncMutex();
+	#invocationTraceContext?: CurrentActorInvocation;
 
 	/**
 	 * Do not call this directly.
@@ -96,6 +101,7 @@ export class ActorHandleRaw {
 		encoding: Encoding,
 		actorResolutionState: ActorResolutionState,
 		gatewayOptions: ActorGatewayOptions = {},
+		invocationTraceContext?: CurrentActorInvocation,
 	) {
 		this.#client = client;
 		this.#driver = driver;
@@ -104,6 +110,7 @@ export class ActorHandleRaw {
 		this.#gatewayOptions = gatewayOptions;
 		this.#params = params;
 		this.#getParams = getParams;
+		this.#invocationTraceContext = invocationTraceContext;
 	}
 
 	async #resolveConnectionParams(): Promise<unknown> {
@@ -303,6 +310,22 @@ export class ActorHandleRaw {
 					name: opts.name,
 					encoding: this.#encoding,
 				});
+				const traceContext = this.#invocationTraceContext?.();
+				const headers = new Headers({
+					[HEADER_ENCODING]: this.#encoding,
+				});
+				if (traceContext) {
+					headers.set(HEADER_RIVETKIT_RAY_ID, traceContext.rayId);
+				}
+				if (traceContext?.span) {
+					headers.set(HEADER_TRACEPARENT, traceContext.span.traceparent);
+					if (traceContext.span.tracestate) {
+						headers.set(HEADER_TRACESTATE, traceContext.span.tracestate);
+					}
+				}
+				if (this.#params !== undefined) {
+					headers.set(HEADER_CONN_PARAMS, JSON.stringify(this.#params));
+				}
 				const output = await sendHttpRequest<
 					protocol.HttpActionRequest,
 					protocol.HttpActionResponse,
@@ -313,16 +336,7 @@ export class ActorHandleRaw {
 				>({
 					url: `http://actor/action/${encodeURIComponent(opts.name)}`,
 					method: "POST",
-					headers: {
-						[HEADER_ENCODING]: this.#encoding,
-						...(this.#params !== undefined
-							? {
-									[HEADER_CONN_PARAMS]: JSON.stringify(
-										this.#params,
-									),
-								}
-							: {}),
-					},
+					headers,
 					body: opts.args,
 					encoding: this.#encoding,
 					customFetch: async (request) =>
