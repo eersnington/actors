@@ -42,6 +42,34 @@ function logField(line: string, name: string): string | undefined {
 	return match?.[1] ?? match?.[2];
 }
 
+async function waitForJsonMessage(
+	websocket: WebSocket,
+	timeoutMs: number,
+): Promise<Record<string, unknown>> {
+	return await new Promise<Record<string, unknown>>((resolve, reject) => {
+		const timeout = setTimeout(
+			() => reject(new Error("timed out waiting for WebSocket message")),
+			timeoutMs,
+		);
+		websocket.addEventListener(
+			"message",
+			(event) => {
+				clearTimeout(timeout);
+				resolve(JSON.parse(String(event.data)));
+			},
+			{ once: true },
+		);
+		websocket.addEventListener(
+			"close",
+			() => {
+				clearTimeout(timeout);
+				reject(new Error("WebSocket closed before sending a message"));
+			},
+			{ once: true },
+		);
+	});
+}
+
 async function closeServer(server: Server): Promise<void> {
 	await new Promise<void>((resolve, reject) => {
 		server.close((error) => (error ? reject(error) : resolve()));
@@ -302,7 +330,6 @@ function decodeStringAttributes(
 		}),
 	);
 }
-
 function protobufFields(message: Uint8Array): Map<number, Uint8Array[]> {
 	const fields = new Map<number, Uint8Array[]>();
 	for (let offset = 0; offset < message.length; ) {
@@ -603,13 +630,17 @@ describe.sequential("native NAPI runtime integration", () => {
 			poolName,
 			disableMetadataLookup: true,
 		}) as any;
+		const actorKey = `correlation-${crypto.randomUUID()}`;
 		const handle = await waitForActorReady(
-			() =>
-				client.correlationSource.create([
-					`correlation-${crypto.randomUUID()}`,
-				]),
+			() => client.correlationSource.create([actorKey]),
 			30_000,
 		);
+		const actorId = await handle.resolve();
+		const websocket = await handle.webSocket();
+		const websocketOpened = await waitForJsonMessage(websocket, 10_000);
+		expect(websocketOpened.actorId).toBe(actorId);
+		expect(typeof websocketOpened.connectionId).toBe("string");
+		websocket.close();
 
 		const tokens = [crypto.randomUUID(), crypto.randomUUID()];
 		expect(await Promise.all(tokens.map((token) => handle.relay(token)))).toEqual(
@@ -674,6 +705,7 @@ describe.sequential("native NAPI runtime integration", () => {
 				traceId: context.traceId,
 				spanId: context.targetSpanId,
 				parentSpanId: context.sourceSpanId,
+				name: "correlationTarget.receive",
 			});
 		}
 		const scheduleOrigin = spans.find(
@@ -695,5 +727,34 @@ describe.sequential("native NAPI runtime integration", () => {
 			traceId: scheduleOrigin?.traceId,
 			spanId: scheduleOrigin?.spanId,
 		});
+
+		const onWake = spans.find(
+			(span) => span.name === "rivet.actor.lifecycle.on_wake",
+		);
+		expect(onWake).toBeDefined();
+		expect(
+			spans.find((span) => span.spanId === onWake?.parentSpanId)?.name,
+		).toBe("rivet.actor.lifecycle.start");
+		const websocketOpen = spans.find(
+			(span) => span.name === "rivet.actor.websocket.open",
+		);
+		expect(websocketOpen).toBeDefined();
+		expect(websocketOpen?.attributes.get("rivet.actor.id")).toBe(actorId);
+		expect(websocketOpen?.attributes.get("rivet.actor.name")).toBe(
+			"correlationSource",
+		);
+		expect(websocketOpen?.attributes.get("rivet.actor.key")).toBe(actorKey);
+		expect(websocketOpen?.attributes.get("rivet.connection.id")).toBe(
+			websocketOpened.connectionId,
+		);
+		const connectedIds = new Set(
+			spans
+				.filter((span) => span.name === "rivet.actor.connection.connect")
+				.map((span) => span.attributes.get("rivet.connection.id")),
+		);
+		const disconnectedIds = spans
+			.filter((span) => span.name === "rivet.actor.connection.disconnect")
+			.map((span) => span.attributes.get("rivet.connection.id"));
+		expect(disconnectedIds.some((id) => id && connectedIds.has(id))).toBe(true);
 	}, 120_000);
 });
