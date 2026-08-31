@@ -337,7 +337,7 @@ impl ActorContext {
 
 	#[napi]
 	pub fn schedule(&self) -> Schedule {
-		Schedule::new(self.inner.clone())
+		Schedule::new(self.inner.clone(), self.invocation_telemetry.clone())
 	}
 
 	#[napi]
