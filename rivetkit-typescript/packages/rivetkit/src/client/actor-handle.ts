@@ -57,6 +57,7 @@ import { type ClientRaw, CREATE_ACTOR_CONN_PROXY } from "./client";
 import { ActorError, isSchedulingError } from "./errors";
 import { retryOnLifecycleBoundary } from "./lifecycle-errors";
 import { logger } from "./log";
+import { readActiveTraceHeaders } from "./otel-context";
 import {
 	createQueueSender,
 	type QueueSendNoWaitOptions,
@@ -328,13 +329,15 @@ export class ActorHandleRaw {
 				}
 				if (invocation) {
 					headers[HEADER_RIVETKIT_RAY_ID] = invocation.rayId;
-					if (invocation.span) {
-						headers[HEADER_TRACEPARENT] =
-							invocation.span.traceparent;
-						if (invocation.span.tracestate) {
-							headers[HEADER_TRACESTATE] =
-								invocation.span.tracestate;
-						}
+				}
+				// An application span active in this JavaScript context wins,
+				// then the calling actor's own Core invocation span.
+				const traceHeaders =
+					readActiveTraceHeaders() ?? invocation?.span;
+				if (traceHeaders) {
+					headers[HEADER_TRACEPARENT] = traceHeaders.traceparent;
+					if (traceHeaders.tracestate) {
+						headers[HEADER_TRACESTATE] = traceHeaders.tracestate;
 					}
 				}
 				const output = await sendHttpRequest<

@@ -1,4 +1,8 @@
 import type {
+	ActorInvocationSpanContext,
+	ActorInvocationTraceContext,
+} from "@/common/actor-telemetry-context";
+import type {
 	SqliteNativeMetrics,
 	SqliteProfilingOptions,
 } from "@/common/database/config";
@@ -30,20 +34,8 @@ export interface RuntimeActorKeySegment {
 }
 
 /** Active actor invocation correlation available to runtime-owned clients and logs. */
-export interface RuntimeActorInvocationTraceContext {
-	readonly rayId: string;
-	/** Core-owned invocation span context, absent when tracing is disabled. */
-	readonly span?: RuntimeActorInvocationSpanContext;
-}
-
-/** W3C span context of the Core invocation span. */
-export interface RuntimeActorInvocationSpanContext {
-	readonly traceId: string;
-	readonly spanId: string;
-	readonly traceFlags: number;
-	readonly traceparent: string;
-	readonly tracestate?: string;
-}
+export type RuntimeActorInvocationTraceContext = ActorInvocationTraceContext;
+export type RuntimeActorInvocationSpanContext = ActorInvocationSpanContext;
 
 /** Resolves correlation at operation time so retained clients cannot freeze stale context. */
 export type CurrentActorInvocation = () =>

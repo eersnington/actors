@@ -1,4 +1,5 @@
 import {
+	type Context,
 	context,
 	createTraceState,
 	isSpanContextValid,
@@ -17,7 +18,7 @@ export function runWithActorInvocationSpan<T>(
 ): T {
 	if (!invocation) return run();
 
-	let parent;
+	let parent: Context;
 	try {
 		const spanContext = {
 			traceId: invocation.traceId,
