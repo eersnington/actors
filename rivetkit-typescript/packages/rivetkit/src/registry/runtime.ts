@@ -29,6 +29,27 @@ export interface RuntimeActorKeySegment {
 	numberValue?: number;
 }
 
+/** Active actor invocation correlation available to runtime-owned clients and logs. */
+export interface RuntimeActorInvocationTraceContext {
+	readonly rayId: string;
+	/** Core-owned invocation span context, absent when tracing is disabled. */
+	readonly span?: RuntimeActorInvocationSpanContext;
+}
+
+/** W3C span context of the Core invocation span. */
+export interface RuntimeActorInvocationSpanContext {
+	readonly traceId: string;
+	readonly spanId: string;
+	readonly traceFlags: number;
+	readonly traceparent: string;
+	readonly tracestate?: string;
+}
+
+/** Resolves correlation at operation time so retained clients cannot freeze stale context. */
+export type CurrentActorInvocation = () =>
+	| RuntimeActorInvocationTraceContext
+	| undefined;
+
 export interface RuntimeHttpRequest {
 	method: string;
 	uri: string;
@@ -540,7 +561,20 @@ export interface CoreRuntime {
 		writes: RuntimeWorkflowKvWrite[],
 	): Promise<void>;
 	actorId(ctx: ActorContextHandle): string;
+	/**
+	 * Runs one actor callback with `ctx` as the current invocation: operations
+	 * on retained handles for the same actor resolve to it, and its Core span
+	 * is the active OpenTelemetry span for the duration of `run`.
+	 */
 	runWithActorInvocationContext<T>(ctx: ActorContextHandle, run: () => T): T;
+	/**
+	 * Correlation of the invocation currently executing for this actor, or
+	 * `undefined` outside an invocation or after it finished. A sampled-out
+	 * invocation can still expose valid span context for propagation.
+	 */
+	actorInvocationTraceContext(
+		ctx: ActorContextHandle,
+	): RuntimeActorInvocationTraceContext | undefined;
 	actorName(ctx: ActorContextHandle): string;
 	actorKey(ctx: ActorContextHandle): RuntimeActorKeySegment[];
 	actorRegion(ctx: ActorContextHandle): string;

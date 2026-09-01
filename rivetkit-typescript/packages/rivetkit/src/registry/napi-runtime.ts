@@ -8,6 +8,7 @@ import type {
 	HttpResponseBodyStream as NativeHttpResponseBodyStream,
 	WebSocket as NativeWebSocket,
 } from "@rivetkit/rivetkit-napi";
+import { runWithActorInvocationSpan } from "./otel-context";
 import type {
 	ActorContextHandle,
 	ActorFactoryHandle,
@@ -17,6 +18,7 @@ import type {
 	CoreRuntime,
 	RegistryHandle,
 	RuntimeActorConfig,
+	RuntimeActorInvocationTraceContext,
 	RuntimeApplicationFetch,
 	RuntimeApplicationListenerConfig,
 	RuntimeBytes,
@@ -576,7 +578,23 @@ export class NapiCoreRuntime implements CoreRuntime {
 	}
 
 	runWithActorInvocationContext<T>(ctx: ActorContextHandle, run: () => T): T {
-		return this.#invocationContext.run(asNativeActorContext(ctx), run);
+		const nativeCtx = asNativeActorContext(ctx);
+		const traceContext = this.#actorInvocationTraceContext(nativeCtx);
+		return this.#invocationContext.run(nativeCtx, () =>
+			runWithActorInvocationSpan(traceContext?.span, run),
+		);
+	}
+
+	actorInvocationTraceContext(
+		ctx: ActorContextHandle,
+	): RuntimeActorInvocationTraceContext | undefined {
+		return this.#actorInvocationTraceContext(asNativeActorContext(ctx));
+	}
+
+	#actorInvocationTraceContext(
+		ctx: NativeActorContext,
+	): RuntimeActorInvocationTraceContext | undefined {
+		return ctx.invocationTraceContext() ?? undefined;
 	}
 
 	actorName(ctx: ActorContextHandle): string {
@@ -897,9 +915,9 @@ export class NapiCoreRuntime implements CoreRuntime {
 	}
 
 	async actorSqlClose(ctx: ActorContextHandle): Promise<void> {
-		const ownerCtx = asNativeActorContext(ctx);
-		const database = this.#sql.get(ownerCtx) ?? ownerCtx.sql();
-		this.#sql.delete(ownerCtx);
+		const nativeCtx = asNativeActorContext(ctx);
+		const database = this.#sql.get(nativeCtx) ?? nativeCtx.sql();
+		this.#sql.delete(nativeCtx);
 		await database.close();
 	}
 

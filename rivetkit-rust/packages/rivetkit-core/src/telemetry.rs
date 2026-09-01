@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use opentelemetry::trace::{
 	SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
 };
+use parking_lot::Mutex;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::ActorContext;
@@ -52,14 +53,38 @@ pub(crate) struct ActorTelemetryIdentity {
 	pub(crate) actor_key: String,
 }
 
-/// Shared invocation state. The span never changes once the invocation starts,
-/// so only the terminal record needs guarding: `finished` lets exactly one of
-/// the explicit finish path and the drop path record a status.
+/// Shared invocation state. Only the span slot is mutable: whichever of the
+/// finish and drop paths runs first takes it, which both records the terminal
+/// status once and drops the span, and dropping the span is what exports it.
+/// `finished` marks the invocation closed even when tracing is off and there
+/// is no span to take.
 #[derive(Debug)]
 struct InvocationInner {
-	span: Option<tracing::Span>,
+	ray_id: String,
+	span: Mutex<Option<tracing::Span>>,
 	finished: AtomicBool,
 	identity: Arc<ActorTelemetryIdentity>,
+}
+
+/// Active actor invocation fields exposed to foreign-runtime adapters.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct ActorInvocationTraceContext {
+	pub ray_id: String,
+	/// Present only while the invocation runs inside a valid span.
+	pub span: Option<ActorInvocationSpanContext>,
+}
+
+/// W3C span context of the current invocation span. A span context is either
+/// complete or absent, so these fields are never optional individually.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct ActorInvocationSpanContext {
+	pub trace_id: String,
+	pub span_id: String,
+	pub trace_flags: u8,
+	pub traceparent: String,
+	pub tracestate: Option<String>,
 }
 
 /// The closed set of SQLite operations that get a span.
@@ -123,33 +148,35 @@ impl ActionInvocationSpan {
 		action_name: &str,
 		incoming: IncomingInvocationContext,
 	) -> Self {
+		let ray_id = incoming
+			.ray_id
+			.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 		let identity = ctx.telemetry_identity();
-		let span = tracing::enabled!(target: "rivetkit::telemetry", tracing::Level::INFO).then(|| {
-			let span = tracing::info_span!(
-				target: "rivetkit::telemetry",
-				parent: None,
-				"rivet.actor.invoke",
-				otel.kind = "server",
-				rivet.invocation.type = "action",
-				rivet.actor.id = %identity.actor_id,
-				rivet.actor.name = %identity.actor_name,
-				rivet.actor.key = %identity.actor_key,
-				rivet.action.name = %action_name,
-				rivet.ray.id = tracing::field::Empty,
-				otel.status_code = tracing::field::Empty,
-				error.type = tracing::field::Empty,
-			);
-			if let Some(ray_id) = incoming.ray_id.as_deref() {
-				span.record("rivet.ray.id", ray_id);
-			}
-			if let Some(parent) = incoming.remote_parent {
-				span.set_parent(opentelemetry::Context::new().with_remote_span_context(parent));
-			}
-			span
-		});
+		let span =
+			tracing::enabled!(target: "rivetkit::telemetry", tracing::Level::INFO).then(|| {
+				let span = tracing::info_span!(
+					target: "rivetkit::telemetry",
+					parent: None,
+					"rivet.actor.invoke",
+					otel.kind = "server",
+					rivet.invocation.type = "action",
+					rivet.actor.id = %identity.actor_id,
+					rivet.actor.name = %identity.actor_name,
+					rivet.actor.key = %identity.actor_key,
+					rivet.action.name = %action_name,
+					rivet.ray.id = tracing::field::Empty,
+					otel.status_code = tracing::field::Empty,
+					error.type = tracing::field::Empty,
+				);
+				span.record("rivet.ray.id", &ray_id);
+				if let Some(parent) = incoming.remote_parent {
+					span.set_parent(opentelemetry::Context::new().with_remote_span_context(parent));
+				}
+				span
+			});
 
 		Self {
-			telemetry: ActorInvocationTelemetry::new(span, identity),
+			telemetry: ActorInvocationTelemetry::new(ray_id, span, identity),
 		}
 	}
 
@@ -170,26 +197,61 @@ impl Drop for ActionInvocationSpan {
 
 impl ActorInvocationTelemetry {
 	fn new(
+		ray_id: String,
 		span: Option<tracing::Span>,
 		identity: Arc<ActorTelemetryIdentity>,
 	) -> Self {
 		Self(Arc::new(InvocationInner {
-			span,
+			ray_id,
+			span: Mutex::new(span),
 			finished: AtomicBool::new(false),
 			identity,
 		}))
 	}
 
+	/// Returns correlation fields only while this actor invocation is active.
+	#[doc(hidden)]
+	pub fn trace_context(&self) -> Option<ActorInvocationTraceContext> {
+		let active = self.active()?;
+		let span = active.span.lock().clone().and_then(|span| {
+			let context = span.context();
+			let context_span = context.span();
+			let span_context = context_span.span_context();
+			if !span_context.is_valid() {
+				return None;
+			}
+			let tracestate = span_context.trace_state().header();
+			Some(ActorInvocationSpanContext {
+				trace_id: span_context.trace_id().to_string(),
+				span_id: span_context.span_id().to_string(),
+				trace_flags: span_context.trace_flags().to_u8(),
+				traceparent: format!(
+					"00-{}-{}-{:02x}",
+					span_context.trace_id(),
+					span_context.span_id(),
+					span_context.trace_flags().to_u8(),
+				),
+				tracestate: (!tracestate.is_empty()).then_some(tracestate),
+			})
+		});
+
+		Some(ActorInvocationTraceContext {
+			ray_id: active.ray_id.clone(),
+			span,
+		})
+	}
+
 	pub(crate) fn start_sqlite(&self, operation: SqliteOperation) -> Option<SqliteOperationSpan> {
-		let parent = self.0.span.as_ref()?;
+		let parent = self.active()?.span.lock().clone()?;
 		let span = tracing::info_span!(
 			target: "rivetkit::telemetry",
-			parent: parent,
+			parent: &parent,
 			"rivet.sqlite.operation",
 			otel.name = operation.span_name(),
 			otel.kind = "internal",
 			rivet.operation.system = "sqlite",
 			rivet.operation.name = operation.as_str(),
+			rivet.ray.id = %self.0.ray_id,
 			rivet.actor.id = %self.0.identity.actor_id,
 			rivet.actor.name = %self.0.identity.actor_name,
 			rivet.actor.key = %self.0.identity.actor_key,
@@ -203,7 +265,7 @@ impl ActorInvocationTelemetry {
 		let Some(span) = self.take_span() else {
 			return;
 		};
-		record_outcome(span, error);
+		record_outcome(&span, error);
 	}
 
 	fn finish_dropped(&self) {
@@ -214,13 +276,20 @@ impl ActorInvocationTelemetry {
 		span.record("error.type", "actor.dropped_reply");
 	}
 
+	/// Borrows the invocation while it is still open. A finished invocation
+	/// yields nothing, so late SQLite work and retained handles cannot attach
+	/// to a span that has already recorded its status.
+	fn active(&self) -> Option<&InvocationInner> {
+		(!self.0.finished.load(Ordering::Acquire)).then_some(&*self.0)
+	}
+
 	/// Claims the terminal record, so the finish and drop paths cannot both
 	/// record a status for the same invocation.
-	fn take_span(&self) -> Option<&tracing::Span> {
+	fn take_span(&self) -> Option<tracing::Span> {
 		if self.0.finished.swap(true, Ordering::AcqRel) {
 			return None;
 		}
-		self.0.span.as_ref()
+		self.0.span.lock().take()
 	}
 }
 

@@ -8,6 +8,7 @@ use ::http;
 const HEADER_RIVET_ACTOR: &str = "x-rivet-actor";
 const HEADER_RIVET_ACTOR_GENERATION: &str = "x-rivet-actor-generation";
 const HEADER_RIVET_ACTOR_KEY: &str = "x-rivet-actor-key";
+const HEADER_RIVETKIT_RAY_ID: &str = "x-rivetkit-ray-id";
 
 struct RequestCancellationGuard {
 	token: Option<tokio_util::sync::CancellationToken>,
@@ -256,10 +257,7 @@ impl RegistryDispatcher {
 				action_name.clone(),
 				args,
 				crate::telemetry::IncomingInvocationContext::from_headers(
-					request
-						.headers()
-						.get("x-rivetkit-ray-id")
-						.and_then(|value| value.to_str().ok().map(str::to_owned)),
+					invocation_ray_id(request.headers()),
 					request
 						.headers()
 						.get("traceparent")
@@ -450,6 +448,24 @@ impl RegistryDispatcher {
 			}
 		}
 	}
+}
+
+/// Reads the caller's ray id. The header is untrusted, so it is bounded to
+/// 128 characters of `[A-Za-z0-9_-]`; anything else counts as absent and the
+/// invocation mints a fresh ray instead.
+fn invocation_ray_id(headers: &http::HeaderMap) -> Option<String> {
+	headers
+		.get(HEADER_RIVETKIT_RAY_ID)?
+		.to_str()
+		.ok()
+		.filter(|value| {
+			!value.is_empty()
+				&& value.len() <= 128
+				&& value
+					.bytes()
+					.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+		})
+		.map(str::to_owned)
 }
 
 enum RegistryHttpRoute {

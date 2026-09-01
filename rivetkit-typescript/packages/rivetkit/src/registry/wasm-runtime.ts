@@ -13,6 +13,7 @@ import type {
 	CoreRuntime,
 	RegistryHandle,
 	RuntimeActorConfig,
+	RuntimeActorInvocationTraceContext,
 	RuntimeActorKeySegment,
 	RuntimeApplicationListenerConfig,
 	RuntimeBytes,
@@ -541,6 +542,12 @@ export class WasmCoreRuntime implements CoreRuntime {
 	): T {
 		// Wasm does not yet carry invocation telemetry across its runtime boundary.
 		return run();
+	}
+
+	actorInvocationTraceContext(
+		_ctx: ActorContextHandle,
+	): RuntimeActorInvocationTraceContext | undefined {
+		return undefined;
 	}
 
 	actorName(ctx: ActorContextHandle): string {

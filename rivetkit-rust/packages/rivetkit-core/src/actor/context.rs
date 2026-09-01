@@ -263,6 +263,12 @@ impl ActorContext {
 		self.0.sql.clone().with_invocation_telemetry(self.1.clone())
 	}
 
+	/// Returns correlation for the invocation this handle serves, absent when
+	/// the handle is not bound to one or tracing is disabled.
+	pub fn invocation_trace_context(&self) -> Option<crate::ActorInvocationTraceContext> {
+		self.1.as_ref()?.trace_context()
+	}
+
 	pub(crate) fn invocation_telemetry(&self) -> Option<&crate::ActorInvocationTelemetry> {
 		self.1.as_ref()
 	}
