@@ -8,6 +8,7 @@ import {
 	type ActorCron,
 	type ActorCronEveryOptions,
 	type ActorCronSetOptions,
+	type ActorLogger,
 	type ActorSchedule,
 	CONN_STATE_MANAGER_SYMBOL,
 	type CronFire,
@@ -109,6 +110,7 @@ import type {
 	CoreRuntime,
 	RegistryHandle,
 	RuntimeActorConfig,
+	RuntimeActorInvocationTraceContext,
 	RuntimeBytes,
 	RuntimeCronFire,
 	RuntimeCronJobInfo,
@@ -2694,6 +2696,7 @@ export class ActorContextHandleAdapter {
 	#db?: unknown;
 	#dispatchCancelToken?: CancellationTokenHandle;
 	#kv?: NativeKvAdapter;
+	#log?: ActorLogger;
 	#queue?: NativeQueueAdapter;
 	#request?: Request;
 	#schedule?: NativeScheduleAdapter;
@@ -2930,8 +2933,30 @@ export class ActorContextHandleAdapter {
 		return this.#connMap;
 	}
 
+	#invocationTraceContext(): RuntimeActorInvocationTraceContext | undefined {
+		return callNativeSync(() =>
+			this.#runtime.actorInvocationTraceContext(this.#ctx),
+		);
+	}
+
 	get log() {
-		return logger();
+		if (!this.#log) {
+			// Actor fields follow the camelCase used by the rest of the
+			// TypeScript logs. trace_id and span_id stay snake_case because
+			// that is what OpenTelemetry log correlation tooling looks for.
+			const invocation = this.#invocationTraceContext();
+			this.#log = logger().child({
+				actorId: this.actorId,
+				actorName: this.name,
+				actorKey: this.key,
+				...(invocation && { rayId: invocation.rayId }),
+				...(invocation?.span && {
+					trace_id: invocation.span.traceId,
+					span_id: invocation.span.spanId,
+				}),
+			});
+		}
+		return this.#log;
 	}
 
 	get abortSignal(): AbortSignal {
