@@ -25,6 +25,8 @@ use crate::cancellation_token::CancellationToken;
 use crate::http::HttpResponseBodyStream;
 use crate::{NapiInvalidState, napi_anyhow_error};
 
+const TELEMETRY_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+
 #[napi(object)]
 pub struct JsServeConfig {
 	pub version: u32,
@@ -322,6 +324,7 @@ impl CoreRegistry {
 		// `wait_ready()` may have armed its waiter while `serve()` was still
 		// registering. Wake it after the state transition so it observes shutdown.
 		self.serving_envoy_ready.notify_waiters();
+		crate::telemetry::flush_best_effort(TELEMETRY_FLUSH_TIMEOUT).await;
 		Ok(())
 	}
 
