@@ -909,6 +909,7 @@ impl ActorTask {
 			} => {
 				let invocation =
 					crate::telemetry::ActionInvocationSpan::start(&self.ctx, &name, incoming);
+				let invocation_telemetry = invocation.telemetry();
 				tracing::info!(
 					actor_id = %self.ctx.actor_id(),
 					action_name = %name,
@@ -925,7 +926,8 @@ impl ActorTask {
 						args,
 						conn: Some(conn),
 						scheduled_fire: None,
-						reply: Reply::from(tracked_reply_tx),
+						reply: Reply::from(tracked_reply_tx)
+							.with_invocation_telemetry(invocation_telemetry),
 					},
 				) {
 					Ok(()) => {
