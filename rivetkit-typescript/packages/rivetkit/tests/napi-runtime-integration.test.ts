@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import getPort from "get-port";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { createClient } from "../src/client/mod";
 import {
 	type OtlpCollector,
@@ -1032,6 +1032,11 @@ describe.sequential("native NAPI runtime integration", () => {
 			{
 				OTEL_BSP_MAX_QUEUE_SIZE: "8",
 				OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "4",
+				// Rust's own log layers admit `opentelemetry_sdk` at warn by
+				// default, so they print this same message and the assertion
+				// below would pass with the bridge dead. Silencing that one
+				// target leaves the JS sink as the only way it reaches stdout.
+				RUST_LOG: "warn,opentelemetry_sdk=off",
 			},
 		);
 		runtime = child;
@@ -1067,6 +1072,17 @@ describe.sequential("native NAPI runtime integration", () => {
 		// 120s delay. Twelve actions finishing well inside one delay window is
 		// what proves the queue drops instead of applying backpressure.
 		expect(elapsed).toBeLessThan(60_000);
+
+		// The SDK's dropped-span warning is bridged into the actor logger, so
+		// it appears in the runtime's own log output rather than only in Rust.
+		await vi.waitFor(
+			() => {
+				expect(runtimeOutput()).toContain(
+					"BatchSpanProcessor.SpanDroppingStarted",
+				);
+			},
+			{ timeout: 15_000, interval: 250 },
+		);
 
 		expect(await waitForActorReady(() => handle.getCount(), 30_000)).toBe(
 			12,

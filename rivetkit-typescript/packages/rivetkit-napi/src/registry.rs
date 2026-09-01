@@ -142,6 +142,14 @@ pub struct CoreRegistry {
 	build_complete: Arc<Notify>,
 }
 
+/// Routes the OpenTelemetry SDK's own warnings, such as dropped spans, to the
+/// JavaScript logger. Call before constructing a registry; later calls are
+/// ignored because the tracing subscriber initializes once.
+#[napi]
+pub fn set_telemetry_log_sink(env: Env, callback: napi::JsFunction) -> napi::Result<()> {
+	crate::telemetry::sdk_log_bridge::install(env, callback)
+}
+
 #[napi]
 impl CoreRegistry {
 	#[napi(constructor)]

@@ -314,6 +314,9 @@ function fakeNapiBindings(scenario: ParityScenario) {
 		NapiActorFactory: FakeActorFactory,
 		CancellationToken: FakeCancellationToken,
 		ActorContext: class {},
+		// The native module exports this, and `createRegistry` calls it on
+		// every registry, so the fake has to carry it too.
+		setTelemetryLogSink: () => {},
 	};
 }
 

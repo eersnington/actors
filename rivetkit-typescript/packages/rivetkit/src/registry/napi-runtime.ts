@@ -8,6 +8,7 @@ import type {
 	HttpResponseBodyStream as NativeHttpResponseBodyStream,
 	WebSocket as NativeWebSocket,
 } from "@rivetkit/rivetkit-napi";
+import { logger } from "./log";
 import { runWithActorInvocationSpan } from "./otel-context";
 import type {
 	ActorContextHandle,
@@ -296,6 +297,31 @@ export class NapiCoreRuntime implements CoreRuntime {
 	}
 
 	createRegistry(): RegistryHandle {
+		// The OpenTelemetry SDK reports dropped spans and export failures
+		// through Rust tracing, which writes to stdout in a different format
+		// from the actor logs. Route them into the same logger instead.
+		//
+		// Only the first call in a process installs a sink, matching the
+		// one-shot tracing subscriber behind it. A second registry in the same
+		// process keeps logging through the first registry's callback, so this
+		// reads as idempotent but is not.
+		//
+		// The addon is published as its own platform package, so it can be
+		// older than this one and not export the sink at all. Forwarding those
+		// diagnostics is best effort, and losing them must not stop the actor
+		// from starting.
+		if (this.#bindings.setTelemetryLogSink) {
+			this.#bindings.setTelemetryLogSink((event) => {
+				logger().warn(
+					{ otelEvent: event.name },
+					event.message || event.name,
+				);
+			});
+		} else {
+			logger().warn(
+				"native addon has no telemetry log sink; OpenTelemetry SDK warnings will not reach the actor logs",
+			);
+		}
 		return asRegistryHandle(new this.#bindings.CoreRegistry());
 	}
 

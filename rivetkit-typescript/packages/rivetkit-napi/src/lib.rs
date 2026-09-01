@@ -138,6 +138,13 @@ pub(crate) fn init_tracing(log_level: Option<&str>) {
 					"rivetkit::telemetry=info",
 				))
 			}))
+			// The SDK reports dropped spans and export failures on its own
+			// target. Forward those to the JavaScript logger so they appear
+			// with the rest of the actor's logs.
+			.with(
+				telemetry::sdk_log_bridge::SdkLogLayer
+					.with_filter(tracing_subscriber::EnvFilter::new("opentelemetry_sdk=warn")),
+			)
 			.with(match log_format {
 				LogFormat::Logfmt => Some(
 					tracing_logfmt::builder()
@@ -163,7 +170,10 @@ pub(crate) fn init_tracing(log_level: Option<&str>) {
 			.init();
 
 		if let Some(error) = otel_error {
-			tracing::warn!(?error, "OpenTelemetry trace export could not be initialized");
+			tracing::warn!(
+				?error,
+				"OpenTelemetry trace export could not be initialized"
+			);
 		}
 	});
 }
