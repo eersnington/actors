@@ -72,6 +72,13 @@ struct InvocationInner {
 	identity: Arc<ActorTelemetryIdentity>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ScheduleTraceOrigin {
+	pub(crate) ray_id: Option<String>,
+	pub(crate) traceparent: Option<String>,
+	pub(crate) tracestate: Option<String>,
+}
+
 /// Active actor invocation fields exposed to foreign-runtime adapters.
 #[doc(hidden)]
 #[derive(Clone, Debug)]
@@ -160,16 +167,24 @@ impl ActorInvocation {
 			InvocationType::Action,
 			incoming.ray_id,
 			incoming.remote_parent,
+			None,
 		)
 	}
 
-	pub(crate) fn start_scheduled(ctx: &ActorContext, action_name: &str) -> Self {
+	pub(crate) fn start_scheduled(
+		ctx: &ActorContext,
+		action_name: &str,
+		origin: ScheduleTraceOrigin,
+	) -> Self {
+		let origin_parent =
+			parse_remote_parent(origin.traceparent.as_deref(), origin.tracestate.as_deref());
 		Self::start(
 			ctx,
 			action_name,
 			InvocationType::Scheduled,
+			origin.ray_id,
 			None,
-			None,
+			origin_parent,
 		)
 	}
 
@@ -179,6 +194,7 @@ impl ActorInvocation {
 		invocation_type: InvocationType,
 		ray_id: Option<String>,
 		parent: Option<SpanContext>,
+		link: Option<SpanContext>,
 	) -> Self {
 		let ray_id = ray_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 		let identity = ctx.telemetry_identity();
@@ -208,6 +224,9 @@ impl ActorInvocation {
 				span.record("rivet.ray.id", &ray_id);
 				if let Some(parent) = parent {
 					span.set_parent(opentelemetry::Context::new().with_remote_span_context(parent));
+				}
+				if let Some(link) = link {
+					span.add_link(link);
 				}
 				span
 			});
@@ -316,6 +335,21 @@ impl ActorInvocationTelemetry {
 			ray_id: active.ray_id.clone(),
 			span,
 		})
+	}
+
+	pub(crate) fn schedule_trace_origin(&self) -> ScheduleTraceOrigin {
+		self.trace_context()
+			.map_or_else(ScheduleTraceOrigin::default, |context| {
+				let (traceparent, tracestate) = match context.span {
+					Some(span) => (Some(span.traceparent), span.tracestate),
+					None => (None, None),
+				};
+				ScheduleTraceOrigin {
+					ray_id: Some(context.ray_id),
+					traceparent,
+					tracestate,
+				}
+			})
 	}
 
 	pub(crate) fn start_sqlite(&self, operation: SqliteOperation) -> Option<SqliteOperationSpan> {
