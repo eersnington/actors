@@ -11,6 +11,8 @@ use parking_lot::Mutex;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::ActorContext;
+use crate::actor::metrics::{ActorMetrics, InvocationStatus, InvocationType};
+use crate::time::Instant;
 
 /// Correlation fields accepted at an invocation boundary.
 #[derive(Debug, Default)]
@@ -32,10 +34,14 @@ impl IncomingInvocationContext {
 	}
 }
 
-/// The single root span for one client action invocation.
+/// Owns the complete lifecycle of one actor invocation.
 #[derive(Debug)]
-pub(crate) struct ActionInvocationSpan {
+pub(crate) struct ActorInvocation {
 	telemetry: ActorInvocationTelemetry,
+	metrics: ActorMetrics,
+	action_name: String,
+	invocation_type: InvocationType,
+	started_at: Instant,
 }
 
 /// Opaque invocation context carried across foreign-runtime adapters.
@@ -142,24 +148,55 @@ pub(crate) struct SqliteOperationSpan {
 	span: Option<tracing::Span>,
 }
 
-impl ActionInvocationSpan {
-	pub(crate) fn start(
+impl ActorInvocation {
+	pub(crate) fn start_action(
 		ctx: &ActorContext,
 		action_name: &str,
 		incoming: IncomingInvocationContext,
 	) -> Self {
-		let ray_id = incoming
-			.ray_id
-			.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+		Self::start(
+			ctx,
+			action_name,
+			InvocationType::Action,
+			incoming.ray_id,
+			incoming.remote_parent,
+		)
+	}
+
+	pub(crate) fn start_scheduled(ctx: &ActorContext, action_name: &str) -> Self {
+		Self::start(
+			ctx,
+			action_name,
+			InvocationType::Scheduled,
+			None,
+			None,
+		)
+	}
+
+	fn start(
+		ctx: &ActorContext,
+		action_name: &str,
+		invocation_type: InvocationType,
+		ray_id: Option<String>,
+		parent: Option<SpanContext>,
+	) -> Self {
+		let ray_id = ray_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 		let identity = ctx.telemetry_identity();
+		// Tracing backends group and chart by span name, so the name carries the
+		// actor and action, and `rivet.invocation.type` still identifies
+		// invocation spans for filtering. That also makes the name a cardinality
+		// surface, so an undeclared action name is folded to a bounded
+		// placeholder here and the same name is used for the span and the metric.
+		let action_name = ctx.metrics().label_action_name(action_name).to_owned();
 		let span =
 			tracing::enabled!(target: "rivetkit::telemetry", tracing::Level::INFO).then(|| {
 				let span = tracing::info_span!(
 					target: "rivetkit::telemetry",
 					parent: None,
 					"rivet.actor.invoke",
-					otel.kind = "server",
-					rivet.invocation.type = "action",
+					otel.name = %format!("{}/{}", identity.actor_name, action_name),
+					otel.kind = invocation_type.otel_kind(),
+					rivet.invocation.type = invocation_type.as_label(),
 					rivet.actor.id = %identity.actor_id,
 					rivet.actor.name = %identity.actor_name,
 					rivet.actor.key = %identity.actor_key,
@@ -169,7 +206,7 @@ impl ActionInvocationSpan {
 					error.type = tracing::field::Empty,
 				);
 				span.record("rivet.ray.id", &ray_id);
-				if let Some(parent) = incoming.remote_parent {
+				if let Some(parent) = parent {
 					span.set_parent(opentelemetry::Context::new().with_remote_span_context(parent));
 				}
 				span
@@ -177,6 +214,10 @@ impl ActionInvocationSpan {
 
 		Self {
 			telemetry: ActorInvocationTelemetry::new(ray_id, span, identity),
+			metrics: ctx.metrics().clone(),
+			action_name,
+			invocation_type,
+			started_at: Instant::now(),
 		}
 	}
 
@@ -184,14 +225,50 @@ impl ActionInvocationSpan {
 		self.telemetry.clone()
 	}
 
-	pub(crate) fn finish(self, error: Option<&anyhow::Error>) {
-		self.telemetry.finish(error);
+	pub(crate) fn finish(mut self, error: Option<&anyhow::Error>) {
+		self.finish_with_status(
+			error.map_or(InvocationStatus::Ok, InvocationStatus::from_error),
+			error,
+		);
+	}
+
+	fn finish_with_status(&mut self, status: InvocationStatus, error: Option<&anyhow::Error>) {
+		let Some(span) = self.telemetry.take_active() else {
+			return;
+		};
+		self.record_finished(span, status, error);
+	}
+
+	/// Records the terminal metric and span status of an invocation whose
+	/// completion the caller has already claimed through `take_active`.
+	fn record_finished(
+		&self,
+		span: Option<tracing::Span>,
+		status: InvocationStatus,
+		error: Option<&anyhow::Error>,
+	) {
+		self.metrics.record_invocation(
+			&self.action_name,
+			self.invocation_type,
+			status,
+			self.started_at.elapsed(),
+		);
+		if let Some(span) = span {
+			record_outcome(&span, error);
+		}
 	}
 }
 
-impl Drop for ActionInvocationSpan {
+impl Drop for ActorInvocation {
 	fn drop(&mut self) {
-		self.telemetry.finish_dropped();
+		// `finish` consumes the invocation, so this runs on the completed path
+		// too. Claim the terminal record first, so the dropped-reply error is
+		// only built for an invocation that really was dropped.
+		let Some(span) = self.telemetry.take_active() else {
+			return;
+		};
+		let error = crate::error::ActorLifecycle::DroppedReply.build();
+		self.record_finished(span, InvocationStatus::Dropped, Some(&error));
 	}
 }
 
@@ -261,21 +338,6 @@ impl ActorInvocationTelemetry {
 		Some(SqliteOperationSpan { span: Some(span) })
 	}
 
-	fn finish(&self, error: Option<&anyhow::Error>) {
-		let Some(span) = self.take_span() else {
-			return;
-		};
-		record_outcome(&span, error);
-	}
-
-	fn finish_dropped(&self) {
-		let Some(span) = self.take_span() else {
-			return;
-		};
-		span.record("otel.status_code", "ERROR");
-		span.record("error.type", "actor.dropped_reply");
-	}
-
 	/// Borrows the invocation while it is still open. A finished invocation
 	/// yields nothing, so late SQLite work and retained handles cannot attach
 	/// to a span that has already recorded its status.
@@ -285,11 +347,11 @@ impl ActorInvocationTelemetry {
 
 	/// Claims the terminal record, so the finish and drop paths cannot both
 	/// record a status for the same invocation.
-	fn take_span(&self) -> Option<tracing::Span> {
+	fn take_active(&self) -> Option<Option<tracing::Span>> {
 		if self.0.finished.swap(true, Ordering::AcqRel) {
 			return None;
 		}
-		self.0.span.lock().take()
+		Some(self.0.span.lock().take())
 	}
 }
 

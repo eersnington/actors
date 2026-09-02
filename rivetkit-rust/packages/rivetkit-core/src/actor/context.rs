@@ -41,7 +41,7 @@ use crate::actor::internal_storage;
 use crate::actor::kv::LegacyActorKv;
 use crate::actor::lifecycle_hooks::Reply;
 use crate::actor::messages::{ActorEvent, Request, StateDelta, WorkflowKvWrite};
-use crate::actor::metrics::{ActorMetrics, InvocationStatus, InvocationType};
+use crate::actor::metrics::ActorMetrics;
 use crate::actor::queue::{QueueInspectorUpdateCallback, QueueMetadata, QueueWaitActivityCallback};
 use crate::actor::schedule::{InternalKeepAwakeCallback, LocalAlarmCallback};
 use crate::actor::sleep::{CanSleep, SleepState};
@@ -1761,27 +1761,26 @@ impl ActorContext {
 		self.track_shutdown_task(async move {
 			let _internal_keep_awake_region = internal_keep_awake_region;
 			ctx.record_user_task_started(UserTaskKind::ScheduledAction);
-			let started_at = Instant::now();
+			let user_task_started_at = Instant::now();
 			let action_name = action.clone();
+			let invocation = crate::telemetry::ActorInvocation::start_scheduled(&ctx, &action_name);
+			let invocation_telemetry = invocation.telemetry();
 			let (reply_tx, reply_rx) = oneshot::channel();
 
 			let mut dispatch_error = None;
-			let mut invocation_status = InvocationStatus::Ok;
-			let mut action_ran = true;
 			match ctx.try_send_actor_event(
 				ActorEvent::Action {
 					name: action.clone(),
 					args,
 					conn: None,
 					scheduled_fire: Some(scheduled_fire),
-					reply: Reply::from(reply_tx),
+					reply: Reply::from(reply_tx).with_invocation_telemetry(invocation_telemetry),
 				},
 				"scheduled_action",
 			) {
 				Ok(()) => match reply_rx.await {
 					Ok(Ok(_)) => {}
 					Ok(Err(error)) => {
-						invocation_status = InvocationStatus::from_error(&error);
 						dispatch_error = Some(error);
 						tracing::error!(
 							error = ?dispatch_error.as_ref().expect("just assigned"),
@@ -1790,9 +1789,13 @@ impl ActorContext {
 							"scheduled event execution failed"
 						);
 					}
-					Err(error) => {
-						invocation_status = InvocationStatus::Dropped;
-						dispatch_error = Some(error.into());
+					Err(_) => {
+						// The receiver is gone, so report the canonical dropped
+						// reply instead of the raw channel error. This one value
+						// reaches the invocation span, the invocation metric, and
+						// the persisted schedule history, so all three agree on
+						// `actor.dropped_reply`.
+						dispatch_error = Some(ActorLifecycleError::DroppedReply.build());
 						tracing::error!(
 							error = ?dispatch_error.as_ref().expect("just assigned"),
 							event_id,
@@ -1802,7 +1805,6 @@ impl ActorContext {
 					}
 				},
 				Err(error) => {
-					action_ran = false;
 					dispatch_error = Some(error);
 					tracing::error!(
 						error = ?dispatch_error.as_ref().expect("just assigned"),
@@ -1812,14 +1814,7 @@ impl ActorContext {
 					);
 				}
 			}
-			if action_ran {
-				ctx.metrics().record_invocation(
-					&action_name,
-					InvocationType::Scheduled,
-					invocation_status,
-					started_at.elapsed(),
-				);
-			}
+			invocation.finish(dispatch_error.as_ref());
 
 			ctx.finish_schedule_dispatch(&event_id, history_id, dispatch_error.as_ref())
 				.await;
@@ -1837,7 +1832,10 @@ impl ActorContext {
 				}
 			}
 
-			ctx.record_user_task_finished(UserTaskKind::ScheduledAction, started_at.elapsed());
+			ctx.record_user_task_finished(
+				UserTaskKind::ScheduledAction,
+				user_task_started_at.elapsed(),
+			);
 		});
 	}
 
