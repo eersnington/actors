@@ -3819,6 +3819,8 @@ dependencies = [
  "rand 0.8.5",
  "serde_json",
  "thiserror 2.0.12",
+ "tokio",
+ "tokio-stream",
  "tracing",
 ]
 
@@ -6312,6 +6314,8 @@ dependencies = [
  "include_dir",
  "js-sys",
  "nix 0.30.1",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "parking_lot",
  "portpicker",
  "rand 0.8.5",
@@ -6341,6 +6345,7 @@ dependencies = [
  "tokio-util",
  "tower-http",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "url",
  "uuid",
@@ -6389,6 +6394,9 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "parking_lot",
  "rivet-depot-client",
  "rivet-error",
@@ -6400,6 +6408,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-logfmt",
+ "tracing-opentelemetry",
  "tracing-stackdriver",
  "tracing-subscriber",
 ]

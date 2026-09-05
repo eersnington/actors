@@ -49,6 +49,7 @@ http-body-util = { workspace = true, optional = true }
 include_dir = { workspace = true }
 nix = { workspace = true, optional = true, features = ["process"] }
 parking_lot.workspace = true
+opentelemetry = { workspace = true, features = ["trace"] }
 rand.workspace = true
 reqwest = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
@@ -74,6 +75,7 @@ tokio-stream = { workspace = true, optional = true }
 tokio-util.workspace = true
 tower-http = { workspace = true, optional = true, features = ["fs"] }
 tracing.workspace = true
+tracing-opentelemetry.workspace = true
 url.workspace = true
 vbare.workspace = true
 
@@ -91,6 +93,7 @@ wasm-bindgen-futures = "0.4"
 web-time = "1.1"
 
 [dev-dependencies]
+opentelemetry_sdk = { workspace = true, features = ["trace"] }
 portpicker.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true

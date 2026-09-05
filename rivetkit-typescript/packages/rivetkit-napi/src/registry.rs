@@ -322,6 +322,7 @@ impl CoreRegistry {
 		// `wait_ready()` may have armed its waiter while `serve()` was still
 		// registering. Wake it after the state transition so it observes shutdown.
 		self.serving_envoy_ready.notify_waiters();
+		crate::telemetry::flush_best_effort(std::time::Duration::from_secs(5)).await;
 		Ok(())
 	}
 

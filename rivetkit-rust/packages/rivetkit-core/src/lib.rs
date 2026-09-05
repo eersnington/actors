@@ -16,6 +16,7 @@ pub mod registry;
 pub mod runtime;
 pub(crate) mod serde_metrics;
 pub mod serverless;
+pub mod telemetry;
 #[cfg(feature = "native-runtime")]
 pub mod serverless_http;
 #[cfg(feature = "native-runtime")]
@@ -119,6 +120,8 @@ pub(crate) mod time {
 }
 pub mod types;
 pub mod websocket;
+
+pub use telemetry::ActorInvocationTelemetry;
 pub use actor::{kv, sqlite};
 
 pub use actor::action::ActionDispatchError;
