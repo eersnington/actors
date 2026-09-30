@@ -8,6 +8,9 @@ use ::http;
 const HEADER_RIVET_ACTOR: &str = "x-rivet-actor";
 const HEADER_RIVET_ACTOR_GENERATION: &str = "x-rivet-actor-generation";
 const HEADER_RIVET_ACTOR_KEY: &str = "x-rivet-actor-key";
+const HEADER_RIVET_RAY_ID: &str = "x-rivet-ray-id";
+const HEADER_TRACEPARENT: &str = "traceparent";
+const HEADER_TRACESTATE: &str = "tracestate";
 
 struct RequestCancellationGuard {
 	token: Option<tokio_util::sync::CancellationToken>,
@@ -255,6 +258,21 @@ impl RegistryDispatcher {
 				conn.clone(),
 				action_name.clone(),
 				args,
+				request
+					.headers()
+					.get(HEADER_RIVET_RAY_ID)
+					.and_then(|value| value.to_str().ok())
+					.map(str::to_owned),
+				request
+					.headers()
+					.get(HEADER_TRACEPARENT)
+					.and_then(|value| value.to_str().ok())
+					.map(str::to_owned),
+				request
+					.headers()
+					.get(HEADER_TRACESTATE)
+					.and_then(|value| value.to_str().ok())
+					.map(str::to_owned),
 			),
 		)
 		.await;

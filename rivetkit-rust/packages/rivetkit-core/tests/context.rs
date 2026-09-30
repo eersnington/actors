@@ -1138,6 +1138,7 @@ mod moved_tests {
 					conn,
 					scheduled_fire,
 					reply,
+					..
 				} => {
 					assert_eq!(name, "tick");
 					assert_eq!(args, vec![1, 2, 3]);
