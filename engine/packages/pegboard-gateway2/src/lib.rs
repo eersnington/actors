@@ -47,6 +47,7 @@ const PHASE_WAITING_FOR_RESPONSE_START: &str = "waiting_for_response_start";
 const PHASE_PRE_WEBSOCKET_OPEN: &str = "pre_websocket_open";
 const PHASE_WAITING_FOR_WEBSOCKET_OPEN: &str = "waiting_for_websocket_open";
 const SLOW_WEBSOCKET_OPEN_WAIT_THRESHOLD: Duration = Duration::from_secs(1);
+const HEADER_RIVET_RAY_ID: &str = "x-rivet-ray-id";
 
 #[derive(RivetError, Serialize, Deserialize)]
 #[error(
@@ -127,7 +128,7 @@ impl PegboardGateway2 {
 		let request_id = req_ctx.in_flight_request_id()?;
 
 		// Extract request parts
-		let headers = req
+		let mut headers = req
 			.headers()
 			.iter()
 			.filter_map(|(name, value)| {
@@ -137,6 +138,7 @@ impl PegboardGateway2 {
 					.map(|value_str| (name.to_string(), value_str.to_string()))
 			})
 			.collect::<HashMap<_, _>>();
+		headers.insert(HEADER_RIVET_RAY_ID.to_owned(), req_ctx.ray_id().to_string());
 
 		// NOTE: Size constraints have already been applied by guard
 		let body_bytes = req
